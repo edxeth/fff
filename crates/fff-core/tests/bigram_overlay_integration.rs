@@ -6,7 +6,7 @@ use std::time::Duration;
 use tempfile::TempDir;
 
 use fff_search::file_picker::{FFFMode, FilePicker};
-use fff_search::grep::{GrepMode, GrepSearchOptions, parse_grep_query};
+use fff_search::grep::{parse_grep_query, GrepMode, GrepSearchOptions};
 use fff_search::{FilePickerOptions, SharedFrecency, SharedPicker};
 
 /// Create a temp directory with some initial files, run the full picker lifecycle,
@@ -283,7 +283,7 @@ fn new_file_findable_after_add() {
         let overflow = picker.get_overflow_files();
         assert_eq!(overflow.len(), 1, "Should have 1 overflow file");
         assert!(
-            overflow[0].as_path().ends_with("newcomer.txt"),
+            overflow[0].relative_path().ends_with("newcomer.txt"),
             "Overflow file should be newcomer.txt"
         );
     }

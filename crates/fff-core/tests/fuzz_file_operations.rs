@@ -19,7 +19,7 @@ use rand::rngs::SmallRng;
 use rand::{RngCore, SeedableRng};
 
 use fff_search::file_picker::{FFFMode, FilePicker, FuzzySearchOptions};
-use fff_search::grep::{GrepMode, GrepSearchOptions, parse_grep_query};
+use fff_search::grep::{parse_grep_query, GrepMode, GrepSearchOptions};
 use fff_search::{FilePickerOptions, PaginationArgs, QueryParser, SharedFrecency, SharedPicker};
 
 const DOMAINS: &[&str] = &[
@@ -702,11 +702,12 @@ fn fuzzy_search_paths(picker: &FilePicker, query: &str) -> Vec<String> {
             },
             ..Default::default()
         },
+        None,
     );
     result
         .items
         .iter()
-        .map(|f| f.path_str().to_string())
+        .map(|f| f.relative_path().to_string())
         .collect()
 }
 

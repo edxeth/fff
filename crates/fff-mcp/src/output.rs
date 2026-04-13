@@ -233,21 +233,21 @@ impl GrepFormatter<'_> {
 
         // File overview: collect first match per file
         let file_preview = collect_file_preview(items, files);
-        let mut content_def_file = "";
-        let mut content_first_file = "";
+        let mut content_def_file = String::new();
+        let mut content_first_file = String::new();
         for fm in &file_preview {
             if content_first_file.is_empty() {
-                content_first_file = fm.file.relative_path();
+                content_first_file = fm.file.relative_path().to_string();
             }
             if content_def_file.is_empty() && fm.is_definition {
-                content_def_file = fm.file.relative_path();
+                content_def_file = fm.file.relative_path().to_string();
             }
         }
 
         let content_suggest = if !content_def_file.is_empty() {
-            content_def_file
+            &content_def_file
         } else {
-            content_first_file
+            &content_first_file
         };
         if !content_suggest.is_empty() {
             let file_count = file_preview.len();
@@ -270,7 +270,7 @@ impl GrepFormatter<'_> {
         // Detailed content (subject to budget)
         let mut char_count = 0usize;
         let mut shown_count = 0usize;
-        let mut current_file = "";
+        let mut current_file = String::new();
 
         // Reorder: definitions first, then usages, then imports (when auto-expanding)
         let sorted_items: Vec<usize> = if auto_expand_defs {
@@ -296,7 +296,7 @@ impl GrepFormatter<'_> {
             let mut match_lines: Vec<String> = Vec::new();
 
             if file.relative_path() != current_file {
-                current_file = file.relative_path();
+                current_file = file.relative_path().to_string();
                 match_lines.push(current_file.to_string());
             }
 
@@ -347,7 +347,7 @@ impl GrepFormatter<'_> {
                 && !show_context
                 && m.is_definition
                 && !m.context_after.is_empty()
-                && !def_expanded_files.contains(file.relative_path())
+                && !def_expanded_files.contains(&file.relative_path())
             {
                 let expand_limit = if def_expanded_files.is_empty() {
                     MAX_DEF_EXPAND_FIRST
@@ -400,20 +400,20 @@ fn format_files_with_matches(
     let file_count = file_map.len();
 
     // Find best Read target
-    let mut first_def_file = "";
-    let mut first_file = "";
+    let mut first_def_file = String::new();
+    let mut first_file = String::new();
     for fm in &file_map {
         if first_file.is_empty() {
-            first_file = fm.file.relative_path();
+            first_file = fm.file.relative_path().to_string();
         }
         if first_def_file.is_empty() && fm.is_definition {
-            first_def_file = fm.file.relative_path();
+            first_def_file = fm.file.relative_path().to_string();
         }
     }
     let suggest_path = if !first_def_file.is_empty() {
-        first_def_file
+        &first_def_file
     } else {
-        first_file
+        &first_file
     };
 
     if !suggest_path.is_empty() {
@@ -508,12 +508,12 @@ fn format_count(
     next_file_offset: usize,
     cursor_store: &mut CursorStore,
 ) -> String {
-    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-    let mut order: Vec<&str> = Vec::new();
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut order: Vec<String> = Vec::new();
     for m in items {
         let path = files[m.file_index].relative_path();
-        let count = counts.entry(path).or_insert_with(|| {
-            order.push(path);
+        let count = counts.entry(path.to_string()).or_insert_with(|| {
+            order.push(path.to_string());
             0
         });
         *count += 1;
@@ -521,7 +521,7 @@ fn format_count(
 
     let mut lines: Vec<String> = Vec::new();
     for path in &order {
-        lines.push(format!("{}: {}", path, counts[*path]));
+        lines.push(format!("{}: {}", path, counts[path.as_str()]));
     }
     if next_file_offset > 0 {
         let cursor_id = cursor_store.store(next_file_offset);

@@ -83,10 +83,11 @@
 //!         pagination: PaginationArgs { offset: 0, limit: 50 },
 //!         ..Default::default()
 //!     },
+//!     picker.path_bigram_index(),
 //! );
 //!
 //! assert!(results.total_matched > 0);
-//! assert!(results.items.first().unwrap().as_path().ends_with("lib.rs"));
+//! assert!(results.items.first().unwrap().relative_path().ends_with("lib.rs"));
 //!
 //! let _ = std::fs::remove_dir_all(&tmp);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
@@ -102,6 +103,8 @@ mod score;
 mod sort_buffer;
 // this is pub only for benchmarks
 pub mod case_insensitive_memmem;
+
+mod simd_path;
 
 /// Core file picker: filesystem indexing, background watching, and fuzzy search.
 ///

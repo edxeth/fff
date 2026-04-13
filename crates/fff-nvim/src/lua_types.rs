@@ -27,15 +27,15 @@ struct LuaPosition((i32, i32));
 impl IntoLua for LuaPosition {
     fn into_lua(self, lua: &Lua) -> LuaResult<LuaValue> {
         let table = lua.create_table()?;
-        table.set("line", self.0.0)?;
-        table.set("col", self.0.1)?;
+        table.set("line", self.0 .0)?;
+        table.set("col", self.0 .1)?;
         Ok(LuaValue::Table(table))
     }
 }
 
 fn file_item_into_lua(item: &FileItem, lua: &Lua) -> LuaResult<LuaValue> {
     let table = lua.create_table()?;
-    table.set("path", item.path_str())?;
+    table.set("path", item.relative_path())?;
     table.set("relative_path", item.relative_path())?;
     table.set("name", item.file_name())?;
     table.set("size", item.size)?;
@@ -123,7 +123,7 @@ impl IntoLua for GrepResultLua<'_> {
 
             // File metadata from the deduplicated files vec
             let file = self.inner.files[m.file_index];
-            item.set("path", file.path_str())?;
+            item.set("path", file.relative_path())?;
             item.set("relative_path", file.relative_path())?;
             item.set("name", file.file_name())?;
             item.set("is_binary", file.is_binary())?;

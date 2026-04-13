@@ -60,6 +60,7 @@ tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 zlob = { workspace = true, optional = true }
 libmimalloc-sys = { version = "0.1", optional = true, features = ["extended"] }
+mimalloc = { version = "0.1", optional = true }
 # Platform-specific: dunce for Windows to avoid \\?\ extended path prefix
 [target.'cfg(windows)'.dependencies]
 dunce = { workspace = true }
@@ -80,3 +81,7 @@ harness = false
 [[bench]]
 name = "memmem_bench"
 harness = false
+
+[[bin]]
+name = "bench_segmented"
+path = "src/bin/bench_segmented.rs"

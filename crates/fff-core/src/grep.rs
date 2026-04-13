@@ -22,6 +22,7 @@ pub use fff_grep::{
 use fff_query_parser::{Constraint, FFFQuery, GrepConfig, QueryParser};
 use rayon::prelude::*;
 use smallvec::SmallVec;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::Level;
 
@@ -385,6 +386,7 @@ struct GrepContext<'a, 'b> {
     total_files: usize,
     filtered_file_count: usize,
     budget: &'a ContentCacheBudget,
+    base_path: &'a Path,
     prefilter: Option<&'a memchr::memmem::Finder<'b>>,
     prefilter_case_insensitive: bool,
     is_cancelled: Option<&'a AtomicBool>,
@@ -935,6 +937,7 @@ pub fn multi_grep_search<'a>(
     bigram_index: Option<&BigramFilter>,
     bigram_overlay: Option<&BigramOverlay>,
     is_cancelled: Option<&AtomicBool>,
+    base_path: &Path,
 ) -> GrepResult<'a> {
     let total_files = files.len();
 
@@ -1048,6 +1051,7 @@ pub fn multi_grep_search<'a>(
             total_files,
             filtered_file_count,
             budget,
+            base_path,
             prefilter: None, // no memmem prefilter for multi-pattern search
             prefilter_case_insensitive: false,
             is_cancelled,
@@ -1494,6 +1498,7 @@ fn fuzzy_grep_search<'a>(
     case_insensitive: bool,
     budget: &ContentCacheBudget,
     is_cancelled: Option<&AtomicBool>,
+    base_path: &Path,
 ) -> GrepResult<'a> {
     // max_typos controls how many *needle* characters can be unmatched.
     // A transposition (e.g. "shcema" → "schema") costs ~1 typo with
@@ -1803,6 +1808,7 @@ pub fn grep_search<'a>(
     bigram_index: Option<&BigramFilter>,
     bigram_overlay: Option<&BigramOverlay>,
     is_cancelled: Option<&AtomicBool>,
+    base_path: &Path,
 ) -> GrepResult<'a> {
     let total_files = files.len();
 
@@ -1911,6 +1917,7 @@ pub fn grep_search<'a>(
                 case_insensitive,
                 budget,
                 is_cancelled,
+                base_path,
             );
         }
         GrepMode::Regex => build_regex(&grep_text, options.smart_case)
@@ -2105,6 +2112,7 @@ pub fn grep_search<'a>(
             total_files,
             filtered_file_count,
             budget,
+            base_path,
             prefilter: should_prefilter.then_some(&finder),
             prefilter_case_insensitive: case_insensitive,
             is_cancelled,
@@ -2308,24 +2316,23 @@ mod tests {
         let meta2 = std::fs::metadata(&file2_path).unwrap();
         let meta3 = std::fs::metadata(&file3_path).unwrap();
 
+        // Keep path strings alive alongside FileItems since path_ptr points into them.
+        let p1 = file1_path.to_string_lossy().into_owned();
+        let p2 = file2_path.to_string_lossy().into_owned();
+        let p3 = file3_path.to_string_lossy().into_owned();
+
         let files = vec![
             {
-                let p = file1_path.to_string_lossy().into_owned();
-                let rs = (p.len() - "grep.rs".len()) as u16;
-                let fs = rs;
-                FileItem::new_raw(p, rs, fs, meta1.len(), 0, None, false)
+                let rs = (p1.len() - "grep.rs".len()) as u16;
+                FileItem::new_raw(&p1, rs, rs, meta1.len(), 0, None, false)
             },
             {
-                let p = file2_path.to_string_lossy().into_owned();
-                let rs = (p.len() - "matcher.rs".len()) as u16;
-                let fs = rs;
-                FileItem::new_raw(p, rs, fs, meta2.len(), 0, None, false)
+                let rs = (p2.len() - "matcher.rs".len()) as u16;
+                FileItem::new_raw(&p2, rs, rs, meta2.len(), 0, None, false)
             },
             {
-                let p = file3_path.to_string_lossy().into_owned();
-                let rs = (p.len() - "other.rs".len()) as u16;
-                let fs = rs;
-                FileItem::new_raw(p, rs, fs, meta3.len(), 0, None, false)
+                let rs = (p3.len() - "other.rs".len()) as u16;
+                FileItem::new_raw(&p3, rs, rs, meta3.len(), 0, None, false)
             },
         ];
 
@@ -2353,6 +2360,7 @@ mod tests {
             None,
             None,
             None,
+            dir.path(),
         );
 
         // Should find matches from file1 (GrepMode, GrepMatch) and file2 (PlainTextMatcher)
@@ -2393,6 +2401,7 @@ mod tests {
             None,
             None,
             None,
+            dir.path(),
         );
         assert_eq!(
             result2.matches.len(),
@@ -2410,6 +2419,7 @@ mod tests {
             None,
             None,
             None,
+            dir.path(),
         );
         assert_eq!(
             result3.matches.len(),

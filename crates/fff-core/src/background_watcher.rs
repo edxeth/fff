@@ -378,6 +378,7 @@ fn handle_debounced_events(
                 }
 
                 let mut files_to_update = Vec::with_capacity(paths_to_add_or_modify.len());
+                let bp = picker.base_path().to_path_buf();
                 for path in &paths_to_add_or_modify {
                     let result = picker.on_create_or_modify(path);
                     match result {
@@ -385,9 +386,10 @@ fn handle_debounced_events(
                             debug!(
                                 "on_create_or_modify({:?}) -> Some({})",
                                 path,
-                                file.path_str()
+                                file.relative_path()
                             );
-                            files_to_update.push(PathBuf::from(file.path_str()));
+                            let abs = file.absolute_path(&bp);
+                            files_to_update.push(abs);
                         }
                         None => {
                             error!("on_create_or_modify({:?}) -> None (file not added!)", path);

@@ -311,11 +311,11 @@ impl FffServer {
                     "0 exact matches. {} approximate:",
                     fuzzy_result.matches.len()
                 ));
-                let mut current_file = "";
+                let mut current_file = String::new();
                 for m in fuzzy_result.matches.iter().take(3) {
                     let file = fuzzy_result.files[m.file_index];
                     if file.relative_path() != current_file {
-                        current_file = file.relative_path();
+                        current_file = file.relative_path().to_string();
                         lines.push(current_file.to_string());
                     }
                     lines.push(format!(" {}: {}", m.line_number, m.line_content));
@@ -340,8 +340,13 @@ impl FffServer {
                         limit: 1,
                     },
                 };
-                let file_result =
-                    FilePicker::fuzzy_search(picker.get_files(), &file_query, None, file_opts);
+                let file_result = FilePicker::fuzzy_search(
+                    picker.get_files(),
+                    &file_query,
+                    None,
+                    file_opts,
+                    picker.path_bigram_index(),
+                );
                 if let (Some(top), Some(score)) =
                     (file_result.items.first(), file_result.scores.first())
                 {
@@ -432,7 +437,8 @@ impl FffServer {
 
         let parser = QueryParser::default();
         let fff_query = parser.parse(query);
-        let result = FilePicker::fuzzy_search(files, &fff_query, None, make_opts(page_offset));
+        let result =
+            FilePicker::fuzzy_search(files, &fff_query, None, make_opts(page_offset), picker.path_bigram_index());
         let total_files = result.total_files;
 
         // Auto-retry with fewer terms if 3+ words return 0 results
@@ -448,6 +454,7 @@ impl FffServer {
                         &shorter_query,
                         /*query_tracker=*/ None,
                         make_opts(0),
+                        picker.path_bigram_index(),
                     );
 
                     (retry.items, retry.scores, retry.total_matched)
@@ -601,6 +608,7 @@ impl FffServer {
             picker.bigram_index(),
             overlay_guard.as_deref(),
             None,
+            picker.base_path(),
         );
         let file_refs: Vec<&FileItem> = result.files.to_vec();
 
@@ -624,7 +632,7 @@ impl FffServer {
 
                 let parsed = parser.parse(&full_query);
                 let fb_result =
-                    grep::grep_search(files, &parsed, &fallback_options, budget, None, None, None);
+                    grep::grep_search(files, &parsed, &fallback_options, budget, None, None, None, picker.base_path());
 
                 if !fb_result.matches.is_empty() {
                     let fb_file_refs: Vec<&FileItem> = fb_result.files.to_vec();

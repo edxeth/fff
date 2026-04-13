@@ -309,6 +309,7 @@ pub unsafe extern "C" fn fff_search(
                 limit: page_size,
             },
         },
+        picker.path_bigram_index(),
     );
 
     let search_result = FffSearchResult::from_core(&results);
@@ -505,6 +506,7 @@ pub unsafe extern "C" fn fff_multi_grep(
         picker.bigram_index(),
         overlay_guard.as_deref(),
         None,
+        picker.base_path(),
     );
     let grep_result = FffGrepResult::from_core(&result);
     FffResult::ok_handle(grep_result as *mut c_void)

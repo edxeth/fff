@@ -4,7 +4,7 @@
 //! language with C FFI support. No JSON serialization is used for search or grep
 //! results — callers read struct fields directly.
 
-use std::ffi::{CString, c_char, c_void};
+use std::ffi::{c_char, c_void, CString};
 use std::ptr;
 
 use fff::git::format_git_status;
@@ -79,8 +79,8 @@ pub struct FffFileItem {
 impl From<&FileItem> for FffFileItem {
     fn from(item: &FileItem) -> Self {
         FffFileItem {
-            path: cstring_new(item.path_str()),
-            relative_path: cstring_new(item.relative_path()),
+            path: cstring_new(&item.relative_path()),
+            relative_path: cstring_new(&item.relative_path()),
             file_name: cstring_new(item.file_name()),
             git_status: cstring_new(format_git_status(item.git_status)),
             size: item.size,
@@ -314,8 +314,8 @@ impl FffGrepMatch {
         };
 
         FffGrepMatch {
-            path: cstring_new(file.path_str()),
-            relative_path: cstring_new(file.relative_path()),
+            path: cstring_new(&file.relative_path()),
+            relative_path: cstring_new(&file.relative_path()),
             file_name: cstring_new(file.file_name()),
             git_status: cstring_new(format_git_status(file.git_status)),
             line_content: cstring_new(&m.line_content),

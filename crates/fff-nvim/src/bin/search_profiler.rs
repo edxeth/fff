@@ -115,6 +115,7 @@ fn main() {
                         limit: 100,
                     },
                 },
+                None,
             );
 
             match_count += results.total_matched;

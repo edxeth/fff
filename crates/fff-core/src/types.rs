@@ -1,12 +1,12 @@
 use std::io::Read;
 use std::path::Path;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::OnceLock;
 
 use crate::constraints::Constrainable;
 use crate::query_tracker::QueryMatchEntry;
 use fff_query_parser::{FFFQuery, FuzzyQuery, Location};
-use neo_frizbee::Matchable;
+use neo_frizbee::MatchableSegmented;
 
 /// Cached file contents — mmap on Unix, heap buffer on Windows.
 ///
@@ -44,8 +44,68 @@ impl FileItemFlags {
     pub const DELETED: u8 = 1 << 1;
 }
 
+/// A directory entry with aggregated metadata from its child files.
+/// Stored in a sorted `Vec<DirItem>` (the "dir table") inside `FileSync`,
+/// giving O(log n) lookup by path and enabling directory picker mode.
+#[derive(Debug, Clone)]
+pub struct DirItem {
+    /// Absolute path of the directory (with trailing separator removed).
+    path: String,
+    /// Byte offset where the relative path begins (mirrors `FileItem::relative_start`).
+    relative_start: u16,
+    /// Number of direct child files in this directory.
+    pub file_count: u32,
+    /// Highest frecency score among direct child files.
+    /// Useful for ranking directories in directory-mode search.
+    pub max_child_frecency: i16,
+    /// Modification time of the most recently modified direct child.
+    pub last_modified: u64,
+}
+
+impl DirItem {
+    pub fn new(path: String, relative_start: u16) -> Self {
+        Self {
+            path,
+            relative_start,
+            file_count: 0,
+            max_child_frecency: 0,
+            last_modified: 0,
+        }
+    }
+
+    /// The full absolute path as a string slice.
+    #[inline]
+    pub fn path_str(&self) -> &str {
+        &self.path
+    }
+
+    /// The full absolute path as a `&Path`.
+    #[inline]
+    pub fn as_path(&self) -> &Path {
+        Path::new(&self.path)
+    }
+
+    /// The relative path from the base directory (without trailing separator).
+    /// For the base directory itself, returns "".
+    #[inline]
+    pub fn relative_path(&self) -> &str {
+        &self.path[self.relative_start as usize..]
+    }
+}
+
+impl neo_frizbee::Matchable for DirItem {
+    #[inline]
+    fn match_str(&self) -> Option<&str> {
+        let rel = self.relative_path();
+        if rel.is_empty() {
+            None
+        } else {
+            Some(rel)
+        }
+    }
+}
+
 /// A single indexed file with metadata, frecency scores, and lazy content cache.
-/// Occupies ~100 bytes + file path per file
 ///
 /// File contents are initialized lazily on the first grep access and cached for
 /// subsequent searches. On Unix, uses mmap backed by the kernel page cache. On
@@ -53,6 +113,17 @@ impl FileItemFlags {
 ///
 /// Thread-safety: `OnceLock` provides lock-free reads after initialization.
 /// Each file is only searched by one rayon worker at a time via `par_iter`.
+///
+/// Path storage — split `[dir, filename]` segments backed by SIMD-chunked arenas:
+///
+/// - `dir_ptr` + `dir_len`: directory relative path (e.g. `src/components/`),
+///   shared across all files in the same directory via the SIMD chunk arena
+///   (16-byte aligned, deduplicated).
+/// - `filename_ptr` + `filename_len`: the filename (e.g. `Button.tsx`),
+///   stored in a packed filename arena.
+///
+/// `MatchableSegmented` provides zero-copy `[dir, filename]` segments for SIMD matching.
+/// Full path reconstruction (`dir ++ filename`) happens only on cold output paths.
 #[derive(Debug)]
 pub struct FileItem {
     /// File size in bytes
@@ -66,42 +137,57 @@ pub struct FileItem {
     /// The file's git status
     pub git_status: Option<git2::Status>,
 
-    /// Absolute path stored as a plain String. We never use path components —
-    /// only slicing, comparison, and passing to fs/DB APIs via `as_path()`.
-    path: String,
-    /// Byte offset where the relative path begins (after base_path + separator).
-    relative_start: u16,
-    /// Byte offset where the filename begins (after last separator).
-    filename_start: u16,
+    /// Raw pointer to the directory portion of the relative path in the
+    /// SIMD chunk arena (16-byte aligned). Empty for root-level files.
+    dir_ptr: *const u8,
+    /// Length of the directory portion in bytes (e.g. `src/lib/` = 8).
+    dir_len: u16,
+    /// Raw pointer to the filename in the filename arena.
+    filename_ptr: *const u8,
+    /// Length of the filename in bytes.
+    filename_len: u16,
+    /// Index into the dir table (`FileSync::dirs`).
+    parent_dir: u32,
     /// Packed boolean flags — see `FileItemFlags`.
     flags: u8,
     /// Lazily-initialized file contents for grep.
-    /// Initialized on first grep access via `OnceLock`; lock-free on subsequent reads.
     content: OnceLock<FileContent>,
 }
+
+// SAFETY: All raw pointers point into immutable arenas owned by FileSync.
+// Base files: dir_ptr → simd chunk arena, filename_ptr → filename arena.
+// Overflow files: both ptrs → per-file Box<[u8]> in overflow arena.
+unsafe impl Send for FileItem {}
+unsafe impl Sync for FileItem {}
 
 impl Clone for FileItem {
     fn clone(&self) -> Self {
         Self {
-            path: self.path.clone(),
-            relative_start: self.relative_start,
-            filename_start: self.filename_start,
+            dir_ptr: self.dir_ptr,
+            dir_len: self.dir_len,
+            filename_ptr: self.filename_ptr,
+            filename_len: self.filename_len,
+            parent_dir: self.parent_dir,
             size: self.size,
             modified: self.modified,
             access_frecency_score: self.access_frecency_score,
             modification_frecency_score: self.modification_frecency_score,
             git_status: self.git_status,
             flags: self.flags,
-            // Don't clone the content — the clone lazily re-creates it on demand
             content: OnceLock::new(),
         }
     }
 }
 
 impl FileItem {
-    /// Create a new `FileItem` with all fields specified and an empty (not yet loaded) mmap.
+    /// Create a new `FileItem`. Initially `dir_ptr` / `filename_ptr` point
+    /// into the `abs_path` String.
+    ///
+    /// Caller must ensure the backing storage outlives this FileItem until
+    /// `repoint_dir` / `repoint_filename` is called to repoint into the
+    /// packed arenas.
     pub fn new_raw(
-        path: String,
+        abs_path: &str,
         relative_start: u16,
         filename_start: u16,
         size: u64,
@@ -114,10 +200,23 @@ impl FileItem {
             flags |= FileItemFlags::BINARY;
         }
 
+        let rel_start = relative_start as usize;
+        let fname_start = filename_start as usize;
+
+        // dir portion: abs_path[rel_start..fname_start] (includes trailing /)
+        let dir_ptr = unsafe { abs_path.as_ptr().add(rel_start) };
+        let dir_len = (fname_start - rel_start) as u16;
+
+        // filename portion: abs_path[fname_start..]
+        let filename_ptr = unsafe { abs_path.as_ptr().add(fname_start) };
+        let filename_len = (abs_path.len() - fname_start) as u16;
+
         Self {
-            path,
-            relative_start,
-            filename_start,
+            dir_ptr,
+            dir_len,
+            filename_ptr,
+            filename_len,
+            parent_dir: u32::MAX,
             size,
             modified,
             access_frecency_score: 0,
@@ -128,35 +227,215 @@ impl FileItem {
         }
     }
 
-    /// The full absolute path as a string slice.
+    /// Create a FileItem from pre-computed pointers into arenas.
+    /// Used by the walk phase to avoid per-file String allocations.
     #[inline]
-    pub fn path_str(&self) -> &str {
-        &self.path
+    pub(crate) fn from_arena_ptrs(
+        dir_ptr: *const u8,
+        dir_len: u16,
+        filename_ptr: *const u8,
+        filename_len: u16,
+        size: u64,
+        modified: u64,
+        git_status: Option<git2::Status>,
+        is_binary: bool,
+    ) -> Self {
+        let mut flags = 0u8;
+        if is_binary {
+            flags |= FileItemFlags::BINARY;
+        }
+        Self {
+            dir_ptr,
+            dir_len,
+            filename_ptr,
+            filename_len,
+            parent_dir: u32::MAX,
+            size,
+            modified,
+            access_frecency_score: 0,
+            modification_frecency_score: 0,
+            git_status,
+            flags,
+            content: OnceLock::new(),
+        }
     }
 
-    /// The full absolute path as a `&Path` (zero-cost on Unix).
+    /// Repoint dir_ptr into the SIMD chunk arena.
+    ///
+    /// # Safety
+    /// `ptr` must point to valid UTF-8 of at least `self.dir_len` bytes
+    /// in memory that outlives this FileItem.
     #[inline]
-    pub fn as_path(&self) -> &Path {
-        Path::new(&self.path)
+    pub unsafe fn repoint_dir(&mut self, ptr: *const u8) {
+        self.dir_ptr = ptr;
     }
 
-    /// The relative path (from the base directory).
+    /// Repoint filename_ptr into the filename arena.
+    ///
+    /// # Safety
+    /// `ptr` must point to valid UTF-8 of at least `self.filename_len` bytes
+    /// in memory that outlives this FileItem.
     #[inline]
-    pub fn relative_path(&self) -> &str {
-        &self.path[self.relative_start as usize..]
+    pub unsafe fn repoint_filename(&mut self, ptr: *const u8) {
+        self.filename_ptr = ptr;
     }
 
-    /// Just the filename component.
+    /// Raw dir_ptr value (may be an offset during the walk phase).
+    #[inline]
+    pub(crate) fn dir_ptr_raw(&self) -> *const u8 {
+        self.dir_ptr
+    }
+
+    /// Raw filename_ptr value (may be an offset during the walk phase).
+    #[inline]
+    pub(crate) fn filename_ptr_raw(&self) -> *const u8 {
+        self.filename_ptr
+    }
+
+    /// Index into the dir table for this file's parent directory.
+    #[inline]
+    pub fn parent_dir_index(&self) -> u32 {
+        self.parent_dir
+    }
+
+    /// Set the parent directory index.
+    #[inline]
+    pub fn set_parent_dir(&mut self, idx: u32) {
+        self.parent_dir = idx;
+    }
+
+    /// The directory portion of the relative path. Zero-cost slice.
+    ///
+    /// For `src/components/Button.tsx` returns `"src/components/"`.
+    /// For root-level files returns `""`.
+    #[inline]
+    pub fn dir_str(&self) -> &str {
+        if self.dir_len == 0 {
+            return "";
+        }
+        unsafe {
+            let slice = std::slice::from_raw_parts(self.dir_ptr, self.dir_len as usize);
+            std::str::from_utf8_unchecked(slice)
+        }
+    }
+
+    /// The full relative path. **Allocates** — cold-path only.
+    ///
+    /// For the hot matching path, use `MatchableSegmented::match_segments()`
+    /// which returns zero-copy `[dir, filename]` segments.
+    #[inline]
+    pub fn relative_path(&self) -> String {
+        let dir = self.dir_str();
+        let filename = self.file_name();
+        let mut s = String::with_capacity(dir.len() + filename.len());
+        s.push_str(dir);
+        s.push_str(filename);
+        s
+    }
+
+    /// Check if the relative path equals `other` without allocating.
+    #[inline]
+    pub fn relative_path_eq(&self, other: &str) -> bool {
+        let dir_len = self.dir_len as usize;
+        let fname_len = self.filename_len as usize;
+        other.len() == dir_len + fname_len
+            && other[..dir_len].as_bytes() == self.dir_bytes()
+            && other[dir_len..].as_bytes() == self.filename_bytes()
+    }
+
+    /// Check if the relative path ends with `suffix` without allocating.
+    #[inline]
+    pub fn relative_path_ends_with(&self, suffix: &str) -> bool {
+        let fname = self.file_name();
+        if suffix.len() <= fname.len() {
+            return fname.ends_with(suffix);
+        }
+        // suffix extends into dir portion
+        let dir = self.dir_str();
+        let total = dir.len() + fname.len();
+        if suffix.len() > total {
+            return false;
+        }
+        let dir_part = suffix.len() - fname.len();
+        dir.ends_with(&suffix[..dir_part]) && fname == &suffix[dir_part..]
+    }
+
+    /// Check if the relative path starts with `prefix` without allocating.
+    #[inline]
+    pub fn relative_path_starts_with(&self, prefix: &str) -> bool {
+        let dir = self.dir_str();
+        if prefix.len() <= dir.len() {
+            return dir.starts_with(prefix);
+        }
+        let fname = self.file_name();
+        let total = dir.len() + fname.len();
+        if prefix.len() > total {
+            return false;
+        }
+        let fname_part = prefix.len() - dir.len();
+        dir == &prefix[..dir.len()] && fname.starts_with(&prefix[dir.len()..dir.len() + fname_part])
+    }
+
+    /// Write the full relative path into a caller buffer. Zero-alloc.
+    /// Returns the written `&str`, or panics if the buffer is too small.
+    #[inline]
+    pub fn write_relative_path<'a>(&self, buf: &'a mut [u8]) -> &'a str {
+        let dir_len = self.dir_len as usize;
+        let fname_len = self.filename_len as usize;
+        let total = dir_len + fname_len;
+        debug_assert!(buf.len() >= total, "buffer too small for relative path");
+        unsafe {
+            std::ptr::copy_nonoverlapping(self.dir_ptr, buf.as_mut_ptr(), dir_len);
+            std::ptr::copy_nonoverlapping(
+                self.filename_ptr,
+                buf.as_mut_ptr().add(dir_len),
+                fname_len,
+            );
+            std::str::from_utf8_unchecked(&buf[..total])
+        }
+    }
+
+    /// Total byte length of the relative path (dir + filename).
+    #[inline]
+    pub fn relative_path_len(&self) -> usize {
+        self.dir_len as usize + self.filename_len as usize
+    }
+
+    /// Just the filename component. Zero-cost slice into the filename arena.
     #[inline]
     pub fn file_name(&self) -> &str {
-        &self.path[self.filename_start as usize..]
+        unsafe {
+            let slice = std::slice::from_raw_parts(self.filename_ptr, self.filename_len as usize);
+            std::str::from_utf8_unchecked(slice)
+        }
+    }
+
+    /// Raw directory bytes (exact length, no padding).
+    #[inline]
+    fn dir_bytes(&self) -> &[u8] {
+        if self.dir_len == 0 {
+            return &[];
+        }
+        unsafe { std::slice::from_raw_parts(self.dir_ptr, self.dir_len as usize) }
+    }
+
+    /// Raw filename bytes (exact length).
+    #[inline]
+    fn filename_bytes(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.filename_ptr, self.filename_len as usize) }
     }
 
     /// Byte offset of the filename within the relative path.
-    /// Equivalent to `relative_path().len() - file_name().len()`.
+    /// This is the dir_len — same semantic as the old `filename_offset`.
     #[inline]
     pub fn filename_offset_in_relative(&self) -> usize {
-        (self.filename_start - self.relative_start) as usize
+        self.dir_len as usize
+    }
+
+    /// Reconstruct the full absolute path. Cold-path only (allocates).
+    #[inline]
+    pub fn absolute_path(&self, base_path: &Path) -> PathBuf {
+        base_path.join(self.relative_path())
     }
 
     #[inline]
@@ -193,17 +472,22 @@ impl FileItem {
     }
 }
 
-impl Matchable for FileItem {
+// ── MatchableSegmented: zero-copy SIMD matching via [dir, filename] segments ──
+
+impl MatchableSegmented for FileItem {
     #[inline]
-    fn match_str(&self) -> Option<&str> {
-        (!self.is_deleted()).then(|| self.relative_path())
+    fn match_segments(&self) -> Option<([&[u8]; 2], u8)> {
+        if self.is_deleted() {
+            return None;
+        }
+        Some(([self.dir_bytes(), self.filename_bytes()], 2))
     }
 }
 
-impl Matchable for &FileItem {
+impl MatchableSegmented for &FileItem {
     #[inline]
-    fn match_str(&self) -> Option<&str> {
-        (!self.is_deleted()).then(|| self.relative_path())
+    fn match_segments(&self) -> Option<([&[u8]; 2], u8)> {
+        (*self).match_segments()
     }
 }
 
@@ -230,7 +514,7 @@ impl FileItem {
     /// of the budget should use [`get_content_for_search`].
     ///
     /// After the first call, this is lock-free (just an atomic load + pointer deref).
-    pub fn get_content(&self, budget: &ContentCacheBudget) -> Option<&[u8]> {
+    pub fn get_content(&self, base_path: &Path, budget: &ContentCacheBudget) -> Option<&[u8]> {
         if let Some(content) = self.content.get() {
             return Some(content);
         }
@@ -249,7 +533,7 @@ impl FileItem {
             return None;
         }
 
-        let content = load_file_content(self.as_path(), self.size)?;
+        let content = load_file_content(&self.absolute_path(base_path), self.size)?;
         let result = self.content.get_or_init(|| content);
 
         // Bump counters. Slight over-count under races is fine — the budget
@@ -325,17 +609,10 @@ fn load_file_content(path: &Path, size: u64) -> Option<FileContent> {
     }
 }
 
-impl AsRef<Path> for FileItem {
-    #[inline]
-    fn as_ref(&self) -> &Path {
-        Path::new(&self.path)
-    }
-}
-
 impl Constrainable for FileItem {
     #[inline]
-    fn relative_path(&self) -> &str {
-        FileItem::relative_path(self)
+    fn dir_path(&self) -> &str {
+        self.dir_str()
     }
 
     #[inline]
@@ -397,6 +674,9 @@ pub struct ScoringContext<'a> {
     pub combo_boost_score_multiplier: i32,
     pub min_combo_count: u32,
     pub pagination: PaginationArgs,
+    /// Path bigram index for pre-filtering fuzzy search candidates.
+    /// When present, eliminates ~90% of files before the expensive SIMD matching.
+    pub path_bigram_index: Option<&'a crate::bigram_filter::BigramFilter>,
 }
 
 impl ScoringContext<'_> {

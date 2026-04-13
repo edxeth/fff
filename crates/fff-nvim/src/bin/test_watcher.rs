@@ -7,8 +7,8 @@ use fff::git::format_git_status;
 use fff::{FFFMode, FuzzySearchOptions, PaginationArgs, QueryParser, SharedFrecency, SharedPicker};
 use std::env;
 use std::io::{self, Write};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -151,7 +151,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if iteration % 40 == 0 {
             let timestamp = chrono::Local::now().format("%H:%M:%S");
             let guard = shared_picker.read().unwrap();
-            let files = guard.as_ref().unwrap().get_files();
+            let picker_ref = guard.as_ref().unwrap();
+            let files = picker_ref.get_files();
             let parser = QueryParser::default();
             let parsed = parser.parse("rs");
             let search_results = FilePicker::fuzzy_search(
@@ -169,6 +170,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         limit: 5,
                     },
                 },
+                None,
             );
 
             println!(

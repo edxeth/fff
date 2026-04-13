@@ -2,18 +2,48 @@ use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
 
-use fff_search::ContentCacheBudget;
-use fff_search::grep::{GrepMode, GrepSearchOptions, grep_search, parse_grep_query};
+use fff_search::grep::{
+    grep_search as grep_search_raw, parse_grep_query, GrepMode, GrepSearchOptions,
+};
 use fff_search::types::FileItem;
+use fff_search::ContentCacheBudget;
 
 /// Create a file inside a temp dir and return its `FileItem`.
+/// Leaks the path String so FileItem raw pointers remain valid for test lifetime.
 fn create_file(base: &Path, relative: &str, contents: &str) -> FileItem {
     let full_path = base.join(relative);
     if let Some(parent) = full_path.parent() {
         fs::create_dir_all(parent).unwrap();
     }
     fs::write(&full_path, contents).unwrap();
-    FileItem::new(full_path, base, None)
+    let (item, path_str) = FileItem::new(full_path, base, None);
+    std::mem::forget(path_str); // keep heap data alive for path_ptr
+    item
+}
+
+/// Wrapper that appends `base_path` argument.
+/// In tests, all files are created with proper relative paths from `base`,
+/// so we just pass `base` as the base_path.
+fn grep_search_with_base<'a>(
+    files: &'a [FileItem],
+    query: &fff_search::FFFQuery<'_>,
+    options: &GrepSearchOptions,
+    budget: &ContentCacheBudget,
+    bigram_index: Option<&fff_search::BigramFilter>,
+    bigram_overlay: Option<&fff_search::BigramOverlay>,
+    is_cancelled: Option<&std::sync::atomic::AtomicBool>,
+    base_path: &Path,
+) -> fff_search::grep::GrepResult<'a> {
+    grep_search_raw(
+        files,
+        query,
+        options,
+        budget,
+        bigram_index,
+        bigram_overlay,
+        is_cancelled,
+        base_path,
+    )
 }
 
 /// Shorthand to build default options for plain text mode.
@@ -77,7 +107,7 @@ fn plain_text_finds_exact_literal() {
     )];
 
     let parsed = parse_grep_query("Hello");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &plain_opts(),
@@ -85,6 +115,7 @@ fn plain_text_finds_exact_literal() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(result.matches.len(), 1);
@@ -103,7 +134,7 @@ fn plain_text_smart_case_insensitive() {
 
     // All lowercase query → smart case → case-insensitive
     let parsed = parse_grep_query("hello");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &plain_opts(),
@@ -111,6 +142,7 @@ fn plain_text_smart_case_insensitive() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(
@@ -131,7 +163,7 @@ fn plain_text_smart_case_sensitive_with_uppercase() {
 
     // Query has uppercase → smart case → case-sensitive
     let parsed = parse_grep_query("Hello");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &plain_opts(),
@@ -139,6 +171,7 @@ fn plain_text_smart_case_sensitive_with_uppercase() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(
@@ -160,7 +193,7 @@ fn plain_text_regex_metacharacters_are_literal() {
 
     // In plain text mode, these regex metacharacters should be literal
     let parsed = parse_grep_query("fn main()");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &plain_opts(),
@@ -168,6 +201,7 @@ fn plain_text_regex_metacharacters_are_literal() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(result.matches.len(), 1);
@@ -175,7 +209,7 @@ fn plain_text_regex_metacharacters_are_literal() {
 
     // Parentheses should NOT be treated as regex groups
     let parsed2 = parse_grep_query("(\"test\")");
-    let result2 = grep_search(
+    let result2 = grep_search_with_base(
         &files,
         &parsed2,
         &plain_opts(),
@@ -183,6 +217,7 @@ fn plain_text_regex_metacharacters_are_literal() {
         None,
         None,
         None,
+        tmp.path(),
     );
     assert_eq!(result2.matches.len(), 1);
     assert_eq!(result2.matches[0].line_number, 2);
@@ -199,7 +234,7 @@ fn plain_text_dot_is_literal() {
 
     // In plain text mode, dot should be literal, not "any char"
     let parsed = parse_grep_query("1.0");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &plain_opts(),
@@ -207,6 +242,7 @@ fn plain_text_dot_is_literal() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(
@@ -227,7 +263,7 @@ fn plain_text_asterisk_is_literal() {
     )];
 
     let parsed = parse_grep_query("**bold**");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &plain_opts(),
@@ -235,6 +271,7 @@ fn plain_text_asterisk_is_literal() {
         None,
         None,
         None,
+        tmp.path(),
     );
     assert_eq!(result.matches.len(), 1);
     assert_eq!(result.matches[0].line_number, 1);
@@ -250,7 +287,7 @@ fn plain_text_backslash_is_literal() {
     )];
 
     let parsed = parse_grep_query("C:\\Users");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &plain_opts(),
@@ -258,6 +295,7 @@ fn plain_text_backslash_is_literal() {
         None,
         None,
         None,
+        tmp.path(),
     );
     assert_eq!(result.matches.len(), 1);
 }
@@ -272,7 +310,7 @@ fn plain_text_across_multiple_files() {
     ];
 
     let parsed = parse_grep_query("use std");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &plain_opts(),
@@ -280,6 +318,7 @@ fn plain_text_across_multiple_files() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(result.matches.len(), 3);
@@ -293,7 +332,7 @@ fn plain_text_highlight_offsets_are_correct() {
     let files = vec![create_file(tmp.path(), "a.txt", "foo bar foo baz foo\n")];
 
     let parsed = parse_grep_query("foo");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &plain_opts(),
@@ -301,6 +340,7 @@ fn plain_text_highlight_offsets_are_correct() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(result.matches.len(), 1);
@@ -319,7 +359,7 @@ fn plain_text_empty_query_returns_no_content_matches() {
     let files = vec![create_file(tmp.path(), "a.txt", "some content\n")];
 
     let parsed = parse_grep_query("");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &plain_opts(),
@@ -327,6 +367,7 @@ fn plain_text_empty_query_returns_no_content_matches() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     // Empty query in grep returns git-modified welcome state (no content matches)
@@ -348,7 +389,7 @@ fn plain_text_binary_files_are_skipped() {
     let binary_file = {
         let p = binary_path.to_string_lossy().into_owned();
         let rs = (p.len() - "binary.dat".len()) as u16;
-        FileItem::new_raw(p, rs, rs, meta.len(), 0, None, true)
+        FileItem::new_raw(&p, rs, rs, meta.len(), 0, None, true)
     };
 
     let text_file = create_file(tmp.path(), "text.txt", "match this text\n");
@@ -356,7 +397,7 @@ fn plain_text_binary_files_are_skipped() {
     let files = vec![binary_file, text_file];
 
     let parsed = parse_grep_query("match this text");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &plain_opts(),
@@ -364,6 +405,7 @@ fn plain_text_binary_files_are_skipped() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     // Only the text file should be searched, not the binary one
@@ -384,7 +426,7 @@ fn plain_text_max_matches_per_file() {
     opts.max_matches_per_file = 5;
 
     let parsed = parse_grep_query("match_target");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &opts,
@@ -392,6 +434,7 @@ fn plain_text_max_matches_per_file() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(
@@ -414,7 +457,7 @@ fn plain_text_page_limit() {
     opts.page_limit = 10;
 
     let parsed = parse_grep_query("target");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &opts,
@@ -422,6 +465,7 @@ fn plain_text_page_limit() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     // page_limit is a soft minimum: we always finish the current file, so we
@@ -465,7 +509,7 @@ fn plain_text_file_offset_pagination() {
 
     loop {
         let parsed = parse_grep_query("unique_token");
-        let result = grep_search(
+        let result = grep_search_with_base(
             &files,
             &parsed,
             &opts,
@@ -473,6 +517,7 @@ fn plain_text_file_offset_pagination() {
             None,
             None,
             None,
+            tmp.path(),
         );
 
         for m in &result.matches {
@@ -524,7 +569,7 @@ fn plain_text_line_numbers_are_correct() {
     )];
 
     let parsed = parse_grep_query("line");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &plain_opts(),
@@ -532,6 +577,7 @@ fn plain_text_line_numbers_are_correct() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(result.matches.len(), 4);
@@ -552,7 +598,7 @@ fn plain_text_max_file_size_filter() {
     opts.max_file_size = 100; // Only allow files up to 100 bytes
 
     let parsed = parse_grep_query("match_me");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &opts,
@@ -560,6 +606,7 @@ fn plain_text_max_file_size_filter() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(result.matches.len(), 0, "large file should be filtered out");
@@ -578,7 +625,7 @@ fn regex_basic_pattern() {
     )];
 
     let parsed = parse_grep_query("foo\\d+");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &regex_opts(),
@@ -586,6 +633,7 @@ fn regex_basic_pattern() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(result.matches.len(), 1);
@@ -600,7 +648,7 @@ fn regex_capture_group_matching() {
 
     // Use a capturing group (not lookahead, which regex crate doesn't support)
     let parsed = parse_grep_query("foo(bar|baz)");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &regex_opts(),
@@ -608,6 +656,7 @@ fn regex_capture_group_matching() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(result.matches.len(), 2);
@@ -631,7 +680,7 @@ fn regex_dot_matches_any_char() {
 
     // In regex mode, . matches any character, so v1.0 matches v1.0, v1x0, v1-0, and v100
     let parsed = parse_grep_query("v1.0");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &regex_opts(),
@@ -639,6 +688,7 @@ fn regex_dot_matches_any_char() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(
@@ -658,7 +708,7 @@ fn regex_alternation() {
     )];
 
     let parsed = parse_grep_query("apple|cherry");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &regex_opts(),
@@ -666,6 +716,7 @@ fn regex_alternation() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(result.matches.len(), 2);
@@ -684,7 +735,7 @@ fn regex_character_class() {
     )];
 
     let parsed = parse_grep_query("c[aou]t");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &regex_opts(),
@@ -692,6 +743,7 @@ fn regex_character_class() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(result.matches.len(), 3);
@@ -715,7 +767,7 @@ fn regex_quantifiers() {
     )];
 
     let parsed = parse_grep_query("fo{2,3}");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &regex_opts(),
@@ -723,6 +775,7 @@ fn regex_quantifiers() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(result.matches.len(), 3, "should match foo, fooo, foooo");
@@ -738,7 +791,7 @@ fn regex_anchors() {
     )];
 
     let parsed = parse_grep_query("^start");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &regex_opts(),
@@ -746,6 +799,7 @@ fn regex_anchors() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(result.matches.len(), 1);
@@ -763,7 +817,7 @@ fn regex_anchors_multiword() {
 
     // ^int ff_ should match lines starting with "int ff_"
     let parsed = parse_grep_query("^int ff_");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &regex_opts(),
@@ -771,6 +825,7 @@ fn regex_anchors_multiword() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(
@@ -788,7 +843,7 @@ fn regex_highlight_offsets_variable_length() {
     let files = vec![create_file(tmp.path(), "a.txt", "aab aaab aaaab\n")];
 
     let parsed = parse_grep_query("a+b");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &regex_opts(),
@@ -796,6 +851,7 @@ fn regex_highlight_offsets_variable_length() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(result.matches.len(), 1);
@@ -819,7 +875,7 @@ fn regex_invalid_pattern_falls_back_to_literal() {
 
     // Invalid regex: unmatched group — should fall back to literal search
     let parsed = parse_grep_query("name(");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &regex_opts(),
@@ -827,6 +883,7 @@ fn regex_invalid_pattern_falls_back_to_literal() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     // Fallback to literal: finds "name(" in "call name(arg)"
@@ -843,7 +900,7 @@ fn regex_invalid_pattern_falls_back_to_literal() {
 
     // A pattern that doesn't exist anywhere — still falls back but finds nothing
     let parsed2 = parse_grep_query("zzz(");
-    let result2 = grep_search(
+    let result2 = grep_search_with_base(
         &files,
         &parsed2,
         &regex_opts(),
@@ -851,6 +908,7 @@ fn regex_invalid_pattern_falls_back_to_literal() {
         None,
         None,
         None,
+        tmp.path(),
     );
     assert_eq!(result2.matches.len(), 0);
     assert!(result2.regex_fallback_error.is_some());
@@ -867,7 +925,7 @@ fn regex_smart_case() {
 
     // Lowercase query → case-insensitive
     let parsed_lower = parse_grep_query("foo");
-    let result_lower = grep_search(
+    let result_lower = grep_search_with_base(
         &files,
         &parsed_lower,
         &regex_opts(),
@@ -875,12 +933,13 @@ fn regex_smart_case() {
         None,
         None,
         None,
+        tmp.path(),
     );
     assert_eq!(result_lower.matches.len(), 3);
 
     // Query with uppercase → case-sensitive
     let parsed_upper = parse_grep_query("Foo");
-    let result_upper = grep_search(
+    let result_upper = grep_search_with_base(
         &files,
         &parsed_upper,
         &regex_opts(),
@@ -888,6 +947,7 @@ fn regex_smart_case() {
         None,
         None,
         None,
+        tmp.path(),
     );
     assert_eq!(result_upper.matches.len(), 1);
 }
@@ -910,7 +970,7 @@ fn regex_across_multiple_files() {
     ];
 
     let parsed = parse_grep_query("fn \\w+\\(\\)");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &regex_opts(),
@@ -918,6 +978,7 @@ fn regex_across_multiple_files() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     // Should match: fn main(), fn helper(), fn test_one(), fn test_two()
@@ -937,7 +998,7 @@ fn plain_text_and_regex_agree_on_simple_literal() {
     )];
 
     let parsed = parse_grep_query("hello");
-    let plain_result = grep_search(
+    let plain_result = grep_search_with_base(
         &files,
         &parsed,
         &plain_opts(),
@@ -945,8 +1006,9 @@ fn plain_text_and_regex_agree_on_simple_literal() {
         None,
         None,
         None,
+        tmp.path(),
     );
-    let regex_result = grep_search(
+    let regex_result = grep_search_with_base(
         &files,
         &parsed,
         &regex_opts(),
@@ -954,6 +1016,7 @@ fn plain_text_and_regex_agree_on_simple_literal() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(plain_result.matches.len(), regex_result.matches.len());
@@ -974,7 +1037,7 @@ fn plain_text_escapes_what_regex_does_not() {
 
     // "$100" — in plain text, $ is literal; in regex, $ is anchor
     let parsed_plain = parse_grep_query("$100");
-    let plain_result = grep_search(
+    let plain_result = grep_search_with_base(
         &files,
         &parsed_plain,
         &plain_opts(),
@@ -982,9 +1045,10 @@ fn plain_text_escapes_what_regex_does_not() {
         None,
         None,
         None,
+        tmp.path(),
     );
     let parsed_regex = parse_grep_query("\\$100");
-    let regex_result = grep_search(
+    let regex_result = grep_search_with_base(
         &files,
         &parsed_regex,
         &regex_opts(),
@@ -992,6 +1056,7 @@ fn plain_text_escapes_what_regex_does_not() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     // Plain text should find "$100" literally
@@ -1014,7 +1079,7 @@ fn grep_with_extension_constraint() {
     ];
 
     let parsed = parse_grep_query("use std *.rs");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &plain_opts(),
@@ -1022,6 +1087,7 @@ fn grep_with_extension_constraint() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     // Should only search .rs files
@@ -1050,7 +1116,7 @@ fn plain_text_bracket_is_literal() {
     )];
 
     let parsed = parse_grep_query("arr[0]");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &plain_opts(),
@@ -1058,6 +1124,7 @@ fn plain_text_bracket_is_literal() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(
@@ -1080,7 +1147,7 @@ fn grep_backslash_escapes_extension_filter() {
 
     // Without escape: "*.rs" is an extension filter, so only .rs files are searched
     let parsed = parse_grep_query("pattern *.rs");
-    let result_filter = grep_search(
+    let result_filter = grep_search_with_base(
         &files,
         &parsed,
         &plain_opts(),
@@ -1088,6 +1155,7 @@ fn grep_backslash_escapes_extension_filter() {
         None,
         None,
         None,
+        tmp.path(),
     );
     assert_eq!(
         result_filter.files.len(),
@@ -1097,7 +1165,7 @@ fn grep_backslash_escapes_extension_filter() {
 
     // With escape: "\*.rs" is literal text, both files are searched
     let parsed_escaped = parse_grep_query("\\*.rs");
-    let result_literal = grep_search(
+    let result_literal = grep_search_with_base(
         &files,
         &parsed_escaped,
         &plain_opts(),
@@ -1105,6 +1173,7 @@ fn grep_backslash_escapes_extension_filter() {
         None,
         None,
         None,
+        tmp.path(),
     );
     assert_eq!(
         result_literal.matches.len(),
@@ -1123,7 +1192,7 @@ fn grep_backslash_escapes_path_segment() {
 
     // With escape: "\\/src/" is literal text, not a path constraint
     let parsed = parse_grep_query("\\/src/");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &plain_opts(),
@@ -1131,6 +1200,7 @@ fn grep_backslash_escapes_path_segment() {
         None,
         None,
         None,
+        tmp.path(),
     );
     assert_eq!(
         result.matches.len(),
@@ -1150,7 +1220,7 @@ fn grep_backslash_escapes_negation() {
 
     // With escape: "\\!test" is literal text "!test"
     let parsed = parse_grep_query("\\!test");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &plain_opts(),
@@ -1158,6 +1228,7 @@ fn grep_backslash_escapes_negation() {
         None,
         None,
         None,
+        tmp.path(),
     );
     assert_eq!(result.matches.len(), 1);
     assert!(result.matches[0].line_content.contains("!test"));
@@ -1173,7 +1244,7 @@ fn grep_with_path_constraint() {
     ];
 
     let parsed = parse_grep_query("target_text /src/");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &plain_opts(),
@@ -1181,6 +1252,7 @@ fn grep_with_path_constraint() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(result.matches.len(), 1);
@@ -1200,7 +1272,7 @@ fn grep_with_negated_extension_constraint() {
 
     let query = "target_text !*.rs";
     let parsed = parse_grep_query(query);
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &plain_opts(),
@@ -1208,6 +1280,7 @@ fn grep_with_negated_extension_constraint() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(
@@ -1234,7 +1307,7 @@ fn grep_with_negated_path_constraint() {
 
     let query = "target_text !/src/";
     let parsed = parse_grep_query(query);
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &plain_opts(),
@@ -1242,6 +1315,7 @@ fn grep_with_negated_path_constraint() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(
@@ -1268,7 +1342,7 @@ fn grep_with_negated_text_constraint() {
 
     let query = "target_text !test";
     let parsed = parse_grep_query(query);
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &plain_opts(),
@@ -1276,6 +1350,7 @@ fn grep_with_negated_text_constraint() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     // "tests/helper.rs" contains "test" in path, should be excluded
@@ -1301,13 +1376,13 @@ fn grep_empty_file_is_skipped() {
     let tmp = TempDir::new().unwrap();
     let empty_path = tmp.path().join("empty.txt");
     fs::write(&empty_path, "").unwrap();
-    let empty_file = FileItem::new(empty_path, tmp.path(), None);
+    let (empty_file, _empty_path_str) = FileItem::new(empty_path, tmp.path(), None);
 
     let text_file = create_file(tmp.path(), "text.txt", "findme\n");
 
     let files = vec![empty_file, text_file];
     let parsed = parse_grep_query("findme");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &plain_opts(),
@@ -1315,6 +1390,7 @@ fn grep_empty_file_is_skipped() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(result.matches.len(), 1);
@@ -1326,7 +1402,7 @@ fn grep_single_line_no_trailing_newline() {
     let files = vec![create_file(tmp.path(), "a.txt", "no newline at end")];
 
     let parsed = parse_grep_query("no newline");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &plain_opts(),
@@ -1334,6 +1410,7 @@ fn grep_single_line_no_trailing_newline() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(result.matches.len(), 1);
@@ -1350,7 +1427,7 @@ fn grep_unicode_content() {
     )];
 
     let parsed = parse_grep_query("régulière");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &plain_opts(),
@@ -1358,12 +1435,13 @@ fn grep_unicode_content() {
         None,
         None,
         None,
+        tmp.path(),
     );
     assert_eq!(result.matches.len(), 1);
     assert_eq!(result.matches[0].line_number, 2);
 
     let parsed2 = parse_grep_query("ñoño");
-    let result2 = grep_search(
+    let result2 = grep_search_with_base(
         &files,
         &parsed2,
         &plain_opts(),
@@ -1371,6 +1449,7 @@ fn grep_unicode_content() {
         None,
         None,
         None,
+        tmp.path(),
     );
     assert_eq!(result2.matches.len(), 1);
     assert_eq!(result2.matches[0].line_number, 3);
@@ -1383,7 +1462,7 @@ fn grep_long_line_is_truncated() {
     let files = vec![create_file(tmp.path(), "long.txt", &long_line)];
 
     let parsed = parse_grep_query("NEEDLE");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &plain_opts(),
@@ -1391,6 +1470,7 @@ fn grep_long_line_is_truncated() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(result.matches.len(), 1);
@@ -1412,7 +1492,7 @@ fn regex_word_boundary() {
     )];
 
     let parsed = parse_grep_query("\\bfoo\\b");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &regex_opts(),
@@ -1420,6 +1500,7 @@ fn regex_word_boundary() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(
@@ -1440,7 +1521,7 @@ fn plain_text_question_mark_is_literal() {
     )];
 
     let parsed = parse_grep_query("?");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &plain_opts(),
@@ -1448,6 +1529,7 @@ fn plain_text_question_mark_is_literal() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(
@@ -1467,7 +1549,7 @@ fn plain_text_query_with_question_mark_in_word() {
     )];
 
     let parsed = parse_grep_query("foo?");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &plain_opts(),
@@ -1475,6 +1557,7 @@ fn plain_text_query_with_question_mark_in_word() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(
@@ -1491,7 +1574,7 @@ fn regex_question_mark_is_quantifier() {
 
     // In regex mode, ? means "zero or one of preceding"
     let parsed = parse_grep_query("colou?r");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &regex_opts(),
@@ -1499,6 +1582,7 @@ fn regex_question_mark_is_quantifier() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(
@@ -1520,7 +1604,7 @@ fn fuzzy_finds_exact_substring() {
     )];
 
     let parsed = parse_grep_query("hello");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &fuzzy_opts(),
@@ -1528,6 +1612,7 @@ fn fuzzy_finds_exact_substring() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(
@@ -1550,7 +1635,7 @@ fn fuzzy_finds_scattered_characters() {
 
     // "mutex" should fuzzy match "mutex_lock" (contiguous prefix)
     let parsed = parse_grep_query("mutex");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &fuzzy_opts(),
@@ -1558,6 +1643,7 @@ fn fuzzy_finds_scattered_characters() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert!(
@@ -1573,7 +1659,7 @@ fn fuzzy_highlight_offsets_correct() {
     let files = vec![create_file(tmp.path(), "a.txt", "hello world\n")];
 
     let parsed = parse_grep_query("hell");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &fuzzy_opts(),
@@ -1581,6 +1667,7 @@ fn fuzzy_highlight_offsets_correct() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(result.matches.len(), 1);
@@ -1606,7 +1693,7 @@ fn fuzzy_unicode_char_indices() {
     // Use "guli" which is a contiguous ASCII substring within "régulière"
     // (the chars g-u-l-i appear contiguously between the two accented chars)
     let parsed = parse_grep_query("guli");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &fuzzy_opts(),
@@ -1614,6 +1701,7 @@ fn fuzzy_unicode_char_indices() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     // Should fuzzy match "régulière" (with multi-byte é and è)
@@ -1628,7 +1716,7 @@ fn fuzzy_empty_query_returns_empty() {
     let files = vec![create_file(tmp.path(), "a.txt", "some content\n")];
 
     let parsed = parse_grep_query("");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &fuzzy_opts(),
@@ -1636,6 +1724,7 @@ fn fuzzy_empty_query_returns_empty() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     // Empty query returns git-modified files, not fuzzy matches
@@ -1652,7 +1741,7 @@ fn fuzzy_with_extension_constraint() {
     ];
 
     let parsed = parse_grep_query("use std *.rs");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &fuzzy_opts(),
@@ -1660,6 +1749,7 @@ fn fuzzy_with_extension_constraint() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     // Should only search .rs files
@@ -1686,7 +1776,7 @@ fn fuzzy_respects_page_limit() {
     opts.max_matches_per_file = 50;
 
     let parsed = parse_grep_query("target");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &opts,
@@ -1694,6 +1784,7 @@ fn fuzzy_respects_page_limit() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     // page_limit is a soft minimum: we always finish the current file, so we
@@ -1730,7 +1821,7 @@ fn fuzzy_respects_max_matches_per_file() {
     opts.max_matches_per_file = 5;
 
     let parsed = parse_grep_query("match");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &opts,
@@ -1738,6 +1829,7 @@ fn fuzzy_respects_max_matches_per_file() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(
@@ -1759,7 +1851,7 @@ fn fuzzy_filters_low_quality_matches() {
     // Search for "abc" - should match "abc_def_ghi" and "abcdefghij" with high scores,
     // but NOT "xyz" (no relation) or "mutex_lock" (only weak letter overlap)
     let parsed = parse_grep_query("abc");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &fuzzy_opts(),
@@ -1767,6 +1859,7 @@ fn fuzzy_filters_low_quality_matches() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     // Should only get high-quality matches
@@ -1797,7 +1890,7 @@ fn fuzzy_exact_match_always_passes() {
 
     // Exact matches should always pass regardless of score threshold
     let parsed = parse_grep_query("exact");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &fuzzy_opts(),
@@ -1805,6 +1898,7 @@ fn fuzzy_exact_match_always_passes() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(
@@ -1825,7 +1919,7 @@ fn fuzzy_score_is_captured() {
     )];
 
     let parsed = parse_grep_query("hello");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &fuzzy_opts(),
@@ -1833,6 +1927,7 @@ fn fuzzy_score_is_captured() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(result.matches.len(), 1);
@@ -1855,7 +1950,7 @@ fn fuzzy_score_is_none_in_plain_mode() {
     let files = vec![create_file(tmp.path(), "test.txt", "hello world\n")];
 
     let parsed = parse_grep_query("hello");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &plain_opts(),
@@ -1863,6 +1958,7 @@ fn fuzzy_score_is_none_in_plain_mode() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(result.matches.len(), 1);
@@ -1888,7 +1984,7 @@ fn plain_text_smart_case_finds_uppercase_content_with_lowercase_query() {
     )];
 
     let parsed = parse_grep_query("vfio-kvm");
-    let result = grep_search(
+    let result = grep_search_with_base(
         &files,
         &parsed,
         &plain_opts(),
@@ -1896,6 +1992,7 @@ fn plain_text_smart_case_finds_uppercase_content_with_lowercase_query() {
         None,
         None,
         None,
+        tmp.path(),
     );
 
     assert_eq!(

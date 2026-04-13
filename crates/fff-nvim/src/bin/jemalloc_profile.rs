@@ -102,6 +102,7 @@ fn test_search_memory_pattern(
                             limit: 50 + (i % 50),
                         },
                     },
+                    None,
                 );
                 (search_result.items.len(), search_result.total_matched)
             } else {

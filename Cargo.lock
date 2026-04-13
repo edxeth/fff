@@ -743,6 +743,7 @@ dependencies = [
  "libmimalloc-sys",
  "memchr",
  "memmap2",
+ "mimalloc",
  "neo_frizbee",
  "notify 9.0.0-rc.2",
  "once_cell",

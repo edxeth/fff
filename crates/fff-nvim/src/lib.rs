@@ -231,6 +231,7 @@ pub fn fuzzy_search_files(
                 limit: page_size.unwrap_or(0),
             },
         },
+        picker.path_bigram_index(),
     );
 
     if results.items.is_empty() && query.contains(std::path::MAIN_SEPARATOR) {
@@ -241,9 +242,9 @@ pub fn fuzzy_search_files(
 
         let path = expand_tilde(pure_query);
         if path.is_absolute() && path.is_file() {
-            if let Ok(idx) = files.binary_search_by(|f| f.as_path().cmp(&path)) {
+            if let Some(found_file) = picker.get_file_by_path(&path) {
                 let found = SearchResult {
-                    items: vec![&files[idx]],
+                    items: vec![found_file],
                     scores: vec![Score {
                         exact_match: true,
                         match_type: "path",

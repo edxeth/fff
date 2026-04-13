@@ -1,9 +1,9 @@
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use fff::file_picker::{FFFMode, FilePicker};
 use fff::types::{ContentCacheBudget, FileItem, PaginationArgs};
 use fff::{
-    FilePickerOptions, FuzzySearchOptions, GrepMode, GrepSearchOptions, QueryParser,
-    SharedFrecency, SharedPicker, build_bigram_index, grep,
+    build_bigram_index, grep, FilePickerOptions, FuzzySearchOptions, GrepMode, GrepSearchOptions,
+    QueryParser, SharedFrecency, SharedPicker,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -686,7 +686,8 @@ fn bench_grep_search(c: &mut Criterion) {
 
     eprintln!("  Building bigram index for {} files...", files.len());
     let start = std::time::Instant::now();
-    let (bigram_filter, _overflow_indices) = build_bigram_index(&files, &budget);
+    let (bigram_filter, _overflow_indices) =
+        build_bigram_index(&files, &budget, Path::new("./big-repo"));
     eprintln!(
         "  Bigram index built in {:.2}s ({} columns)",
         start.elapsed().as_secs_f64(),
@@ -732,6 +733,7 @@ fn bench_grep_search(c: &mut Criterion) {
                     Some(&bigram_filter),
                     None,
                     None,
+                    Path::new("./big-repo"),
                 );
                 result.matches.len()
             });
@@ -748,6 +750,7 @@ fn bench_grep_search(c: &mut Criterion) {
                     None,
                     None,
                     None,
+                    Path::new("./big-repo"),
                 );
                 result.matches.len()
             });

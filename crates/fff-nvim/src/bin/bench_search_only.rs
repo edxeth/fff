@@ -43,7 +43,7 @@ fn main() {
                     .map(|i| i + 1)
                     .unwrap_or(relative_start as usize) as u16;
                 files.push(FileItem::new_raw(
-                    path_string,
+                    &path_string,
                     relative_start,
                     filename_start,
                     entry.metadata().ok().map_or(0, |m| m.len()),
@@ -104,6 +104,7 @@ fn main() {
                         limit: 100,
                     },
                 },
+                None,
             );
             match_count += results.total_matched;
         }

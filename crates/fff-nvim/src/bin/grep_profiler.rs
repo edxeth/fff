@@ -10,9 +10,9 @@
 ///   cargo build --release --bin grep_profiler
 ///   ./target/release/grep_profiler [--path /path/to/repo]
 use fff::{
-    BigramFilter, FileItem,
-    grep::{GrepMode, GrepSearchOptions, grep_search, parse_grep_query},
+    grep::{grep_search, parse_grep_query, GrepMode, GrepSearchOptions},
     types::ContentCacheBudget,
+    BigramFilter, FileItem,
 };
 use std::io::Read;
 use std::path::Path;
@@ -47,7 +47,7 @@ fn load_files(base_path: &Path) -> Vec<FileItem> {
                 .map(|i| i + 1)
                 .unwrap_or(relative_start as usize) as u16;
             files.push(FileItem::new_raw(
-                path_string,
+                &path_string,
                 relative_start,
                 filename_start,
                 size,
@@ -124,17 +124,19 @@ struct GrepBench<'a> {
     files: &'a [FileItem],
     options: GrepSearchOptions,
     bigram_index: Option<&'a BigramFilter>,
+    base_path: &'a std::path::Path,
 }
 
 impl<'a> GrepBench<'a> {
-    fn new(files: &'a [FileItem]) -> Self {
-        Self::with_mode(files, GrepMode::PlainText)
+    fn new(files: &'a [FileItem], base_path: &'a std::path::Path) -> Self {
+        Self::with_mode(files, GrepMode::PlainText, base_path)
     }
 
-    fn with_mode(files: &'a [FileItem], mode: GrepMode) -> Self {
+    fn with_mode(files: &'a [FileItem], mode: GrepMode, base_path: &'a std::path::Path) -> Self {
         Self {
             files,
             bigram_index: None,
+            base_path,
             options: GrepSearchOptions {
                 max_file_size: 10 * 1024 * 1024,
                 max_matches_per_file: 200,
@@ -168,6 +170,7 @@ impl<'a> GrepBench<'a> {
             self.bigram_index,
             None,
             None,
+            self.base_path,
         );
         let elapsed = start.elapsed();
         (elapsed, result.matches.len(), result.total_files_searched)
@@ -190,9 +193,9 @@ impl<'a> GrepBench<'a> {
     }
 }
 
-fn build_bigram(files: &mut [FileItem]) -> BigramFilter {
+fn build_bigram(files: &mut [FileItem], base_path: &Path) -> BigramFilter {
     let budget = ContentCacheBudget::default();
-    let (index, binary_indices) = fff::build_bigram_index(files, &budget);
+    let (index, binary_indices) = fff::build_bigram_index(files, &budget, base_path);
 
     for &i in &binary_indices {
         files[i].set_binary(true);
@@ -276,7 +279,7 @@ fn main() {
         large_files,
     );
 
-    let bench = GrepBench::new(&files);
+    let bench = GrepBench::new(&files, &canonical);
 
     eprintln!("[2/7] Cold cache benchmarks (first search, mmap not yet loaded)");
     eprintln!("  Each query runs once with fresh FileItem mmaps.\n");
@@ -296,7 +299,7 @@ fn main() {
     for (name, query) in &cold_queries {
         // Re-load files to get fresh FileItems with no cached mmaps
         let fresh_files = load_files(&canonical);
-        let fresh_bench = GrepBench::new(&fresh_files);
+        let fresh_bench = GrepBench::new(&fresh_files, &canonical);
         let (stats, matches, files_searched) = fresh_bench.bench_query(query, 1);
         print_row(name, &stats, matches, files_searched, 1);
     }
@@ -337,7 +340,7 @@ fn main() {
 
     eprintln!("\n[3b/7] Building bigram index...");
     let bigram_start = Instant::now();
-    let bigram_index = build_bigram(&mut files);
+    let bigram_index = build_bigram(&mut files, &canonical);
     eprintln!(
         "  Built in {:.2}s ({} columns, {:.1} MB)\n",
         bigram_start.elapsed().as_secs_f64(),
@@ -348,7 +351,7 @@ fn main() {
     eprintln!("[3c/7] Bigram-accelerated warm benchmarks (same queries, with bigram prefilter)");
     print_header();
 
-    let bigram_bench = GrepBench::new(&files).with_bigram(&bigram_index);
+    let bigram_bench = GrepBench::new(&files, &canonical).with_bigram(&bigram_index);
     for (name, query, iters) in &warm_queries {
         let bigram_name = format!("bg_{}", name.strip_prefix("warm_").unwrap_or(name));
         let (stats, matches, files_searched) = bigram_bench.bench_query(query, *iters);
@@ -360,7 +363,7 @@ fn main() {
     eprintln!("  Running 3 warmup iterations, then measuring.\n");
     print_header();
 
-    let fuzzy_bench = GrepBench::with_mode(&files, GrepMode::Fuzzy);
+    let fuzzy_bench = GrepBench::with_mode(&files, GrepMode::Fuzzy, &canonical);
 
     let fuzzy_queries: Vec<(&str, &str, usize)> = vec![
         ("fuzzy_exact", "mutex_lock", 15),
@@ -392,7 +395,7 @@ fn main() {
     print_header();
 
     let fuzzy_bigram_bench =
-        GrepBench::with_mode(&files, GrepMode::Fuzzy).with_bigram(&bigram_index);
+        GrepBench::with_mode(&files, GrepMode::Fuzzy, &canonical).with_bigram(&bigram_index);
 
     for (name, query, iters) in &fuzzy_queries {
         let bg_name = format!("bg_{}", name);
@@ -448,7 +451,7 @@ fn main() {
     eprintln!("[6/7] Incremental typing simulation (plain text)");
     eprintln!("  Simulates user typing character by character.\n");
 
-    let bench = GrepBench::new(&files);
+    let bench = GrepBench::new(&files, &canonical);
     let typing_sequences: Vec<(&str, Vec<&str>)> = vec![
         (
             "mutex_lock",
@@ -530,6 +533,7 @@ fn main() {
             None,
             None,
             None,
+            &canonical,
         );
         let elapsed = start.elapsed();
         eprintln!(

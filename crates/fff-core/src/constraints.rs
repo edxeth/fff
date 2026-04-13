@@ -45,14 +45,31 @@ const PAR_THRESHOLD: usize = 10_000;
 /// Trait for items that can be filtered by constraints.
 /// Implement this for any searchable item type (files, grep results, etc.).
 pub trait Constrainable {
-    /// The file's relative path (e.g. "src/main.rs")
-    fn relative_path(&self) -> &str;
+    /// The directory portion of the relative path (e.g. "src/" or "" for root)
+    fn dir_path(&self) -> &str;
 
     /// The file name component (e.g. "main.rs")
     fn file_name(&self) -> &str;
 
     /// The git status of this item, if available
     fn git_status(&self) -> Option<git2::Status>;
+
+    /// Write the full relative path (dir + filename) into `buf`.
+    /// Returns `&str` over the written bytes.
+    fn write_relative_path<'a>(&self, buf: &'a mut [u8; 512]) -> &'a str {
+        let dir = self.dir_path().as_bytes();
+        let fname = self.file_name().as_bytes();
+        let total = dir.len() + fname.len();
+        buf[..dir.len()].copy_from_slice(dir);
+        buf[dir.len()..total].copy_from_slice(fname);
+
+        unsafe { std::str::from_utf8_unchecked(&buf[..total]) }
+    }
+
+    /// Reconstruct the full relative path. Allocates.
+    fn relative_path(&self) -> String {
+        format!("{}{}", self.dir_path(), self.file_name())
+    }
 }
 
 /// Check if a relative path ends with the given suffix at a `/` boundary (case-insensitive).
@@ -145,14 +162,27 @@ fn item_matches_constraint_at_index<T: Constrainable>(
                 .get(*glob_idx)
                 .map(|(is_neg, set)| {
                     let matched = set.contains(&item_index);
-                    if *is_neg { !matched } else { matched }
+
+                    if *is_neg {
+                        !matched
+                    } else {
+                        matched
+                    }
                 })
                 .unwrap_or(true);
             *glob_idx += 1;
             return if negate { !result } else { result };
         }
-        Constraint::PathSegment(segment) => path_contains_segment(item.relative_path(), segment),
-        Constraint::FilePath(suffix) => path_ends_with_suffix(item.relative_path(), suffix),
+        Constraint::PathSegment(segment) => {
+            let mut buf = [0u8; 512];
+            let path = item.write_relative_path(&mut buf);
+            path_contains_segment(path, segment)
+        }
+        Constraint::FilePath(suffix) => {
+            let mut buf = [0u8; 512];
+            let path = item.write_relative_path(&mut buf);
+            path_ends_with_suffix(path, suffix)
+        }
         Constraint::GitStatus(status_filter) => match (item.git_status(), status_filter) {
             (Some(status), GitStatusFilter::Modified) => is_modified_status(status),
             (Some(status), GitStatusFilter::Untracked) => status.contains(git2::Status::WT_NEW),
@@ -179,13 +209,21 @@ fn item_matches_constraint_at_index<T: Constrainable>(
         }
 
         // only works with negation
-        Constraint::Text(text) => contains_ascii_ci(item.relative_path(), text),
+        Constraint::Text(text) => {
+            let mut buf = [0u8; 512];
+            let path = item.write_relative_path(&mut buf);
+            contains_ascii_ci(path, text)
+        }
 
         // Parts and Exclude are handled at a higher level
         Constraint::Parts(_) | Constraint::Exclude(_) | Constraint::FileType(_) => true,
     };
 
-    if negate { !matches } else { matches }
+    if negate {
+        !matches
+    } else {
+        matches
+    }
 }
 
 /// Apply constraint-based prefiltering in a single pass over all items.
@@ -219,8 +257,21 @@ pub fn apply_constraints<'a, T: Constrainable + Sync>(
         .any(|c| matches!(c, Constraint::Glob(_) | Constraint::Not(_)));
 
     let glob_results = if has_globs {
-        let paths: Vec<&str> = items.iter().map(|f| f.relative_path()).collect();
-        precompute_glob_matches(&other_constraints, &paths)
+        // Build a single contiguous buffer of all relative paths + offset table.
+        // One allocation for the buffer, one for offsets — NOT one String per file.
+        let mut buf = Vec::<u8>::new();
+        let mut offsets = Vec::<(usize, usize)>::with_capacity(items.len());
+        for item in items.iter() {
+            let start = buf.len();
+            buf.extend_from_slice(item.dir_path().as_bytes());
+            buf.extend_from_slice(item.file_name().as_bytes());
+            offsets.push((start, buf.len() - start));
+        }
+        let path_refs: Vec<&str> = offsets
+            .iter()
+            .map(|&(off, len)| unsafe { std::str::from_utf8_unchecked(&buf[off..off + len]) })
+            .collect();
+        precompute_glob_matches(&other_constraints, &path_refs)
     } else {
         Vec::new()
     };

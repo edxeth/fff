@@ -1,4 +1,3 @@
-use fff::FileItem;
 /// Fuzzy grep quality test against ~/dev/lightsource
 ///
 /// Runs queries through the fuzzy grep pipeline and prints results
@@ -7,7 +6,8 @@ use fff::FileItem;
 /// Usage:
 ///   cargo run --release --bin fuzzy_grep_test              # runs default test queries
 ///   cargo run --release --bin fuzzy_grep_test -- "query"   # runs a single user query
-use fff::grep::{GrepMode, GrepSearchOptions, grep_search, parse_grep_query};
+use fff::grep::{grep_search, parse_grep_query, GrepMode, GrepSearchOptions};
+use fff::FileItem;
 use std::io::Read;
 use std::path::Path;
 use std::time::Instant;
@@ -41,7 +41,7 @@ fn load_files(base_path: &Path) -> Vec<FileItem> {
                 .map(|i| i + 1)
                 .unwrap_or(relative_start as usize) as u16;
             files.push(FileItem::new_raw(
-                path_string,
+                &path_string,
                 relative_start,
                 filename_start,
                 size,
@@ -67,7 +67,7 @@ fn detect_binary(path: &Path, size: u64) -> bool {
     buf[..n].contains(&0)
 }
 
-fn run_fuzzy_query(files: &[FileItem], query: &str, label: &str) {
+fn run_fuzzy_query(files: &[FileItem], query: &str, label: &str, base_path: &std::path::Path) {
     let options = GrepSearchOptions {
         max_file_size: 10 * 1024 * 1024,
         max_matches_per_file: 200,
@@ -92,6 +92,7 @@ fn run_fuzzy_query(files: &[FileItem], query: &str, label: &str) {
         None,
         None,
         None,
+        base_path,
     );
     let elapsed = start.elapsed();
 
@@ -215,17 +216,23 @@ fn main() {
 
     if queries.is_empty() {
         // Run default test queries
-        run_fuzzy_query(&files, "shcema", "transposition of 'schema'");
-        run_fuzzy_query(&files, "SortedMap", "should match SortedArrayMap");
+        run_fuzzy_query(&files, "shcema", "transposition of 'schema'", &repo_path);
+        run_fuzzy_query(
+            &files,
+            "SortedMap",
+            "should match SortedArrayMap",
+            &repo_path,
+        );
         run_fuzzy_query(
             &files,
             "struct SortedMap",
             "should NOT match SourcingProjectMetadataParts",
+            &repo_path,
         );
     } else {
         // Run user-provided queries
         for query in &queries {
-            run_fuzzy_query(&files, query, "user query");
+            run_fuzzy_query(&files, query, "user query", &repo_path);
         }
     }
 
