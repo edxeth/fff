@@ -38,7 +38,7 @@ use crate::git::GitStatusCache;
 use crate::grep::{GrepResult, GrepSearchOptions, grep_search, multi_grep_search};
 use crate::ignore::non_git_repo_overrides;
 use crate::query_tracker::QueryTracker;
-use crate::score::match_and_score_files;
+use crate::score::fuzzy_match_and_score_files;
 use crate::shared::{SharedFrecency, SharedPicker};
 use crate::simd_path::ArenaPtr;
 use crate::types::{
@@ -847,7 +847,7 @@ impl FilePicker {
             .map(|b| b.as_arena_ptr())
             .unwrap_or(base_arena);
 
-        let (items, scores, total_matched) = match_and_score_files(
+        let (items, scores, total_matched) = fuzzy_match_and_score_files(
             files,
             &context,
             self.sync_data.base_count,

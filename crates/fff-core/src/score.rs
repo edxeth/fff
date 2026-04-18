@@ -2,14 +2,14 @@ use crate::{
     constraints::apply_constraints,
     git::is_modified_status,
     path_utils::calculate_distance_penalty,
-    simd_path::{ArenaPtr, SimdChunk},
+    simd_path::ArenaPtr,
     sort_buffer::{sort_by_key_with_buffer, sort_with_buffer},
     types::{FileItem, Score, ScoringContext},
 };
 use fff_query_parser::FuzzyQuery;
 use neo_frizbee::Scoring;
 use rayon::prelude::*;
-use std::path::MAIN_SEPARATOR;
+use std::{borrow::Cow, path::MAIN_SEPARATOR};
 
 enum FileItems<'a> {
     All(&'a [FileItem]),
@@ -116,34 +116,44 @@ fn match_fuzzy_parts(
 }
 
 /// Match + score across base and overflow files, each with their own arena.
-pub(crate) fn match_and_score_files<'a>(
+#[tracing::instrument(skip_all, level = tracing::Level::DEBUG)]
+pub(crate) fn fuzzy_match_and_score_files<'a>(
     files: &'a [FileItem],
     context: &ScoringContext,
     base_count: usize,
     base_arena: ArenaPtr,
     overflow_arena: ArenaPtr,
 ) -> (Vec<&'a FileItem>, Vec<Score>, usize) {
-    if base_count >= files.len() {
-        return match_and_score_in_arena(files, context, base_arena);
-    }
+    // Process overflow files first: newly added files (created after the
+    // initial scan) live in the overflow arena and are more likely to be
+    // relevant to the current search.
+    //
+    // putting them first in the list makes sorting more efficient and gives
+    // them tiebreaker advantage in case sorting is the same
+    let results = if files.len() > base_count {
+        let mut results = match_and_score_in_arena(&files[base_count..], context, overflow_arena);
 
-    let (mut items, mut scores, base_matched) =
-        match_and_score_in_arena(&files[..base_count], context, base_arena);
-    let (ov_items, ov_scores, ov_matched) =
-        match_and_score_in_arena(&files[base_count..], context, overflow_arena);
+        results.extend(match_and_score_in_arena(
+            &files[..base_count],
+            context,
+            base_arena,
+        ));
 
-    items.extend(ov_items);
-    scores.extend(ov_scores);
-    (items, scores, base_matched + ov_matched)
+        results
+    } else {
+        match_and_score_in_arena(files, context, base_arena)
+    };
+
+    sort_and_paginate(results, context)
 }
 
 fn match_and_score_in_arena<'a>(
     files: &'a [FileItem],
     context: &ScoringContext,
     arena: ArenaPtr,
-) -> (Vec<&'a FileItem>, Vec<Score>, usize) {
+) -> Vec<(&'a FileItem, Score)> {
     if files.is_empty() {
-        return (vec![], vec![], 0);
+        return vec![];
     }
 
     let parsed = context.query;
@@ -153,7 +163,7 @@ fn match_and_score_in_arena<'a>(
         match apply_constraints(files, &parsed.constraints, arena) {
             Some(filtered) if !filtered.is_empty() => FileItems::Filtered(filtered),
             Some(_) => {
-                return (vec![], vec![], 0);
+                return vec![];
             }
             None => FileItems::All(files),
         }
@@ -166,8 +176,8 @@ fn match_and_score_in_arena<'a>(
             return score_filtered_by_frecency(&working_files, context, arena);
         }
     };
-    debug_assert!(!fuzzy_parts.is_empty());
 
+    debug_assert!(!fuzzy_parts.is_empty());
     let has_uppercase = fuzzy_parts
         .iter()
         .any(|p| p.chars().any(|c| c.is_uppercase()));
@@ -183,8 +193,6 @@ fn match_and_score_in_arena<'a>(
         },
     };
 
-    let t0 = std::time::Instant::now();
-
     let path_matches = match_fuzzy_parts(
         fuzzy_parts,
         &working_files,
@@ -192,8 +200,6 @@ fn match_and_score_in_arena<'a>(
         context.max_threads,
         arena,
     );
-
-    let t1 = std::time::Instant::now();
 
     let main_needle = fuzzy_parts[0].as_bytes(); // safe
     let main_needle_len = main_needle.len() as u16;
@@ -203,7 +209,7 @@ fn match_and_score_in_arena<'a>(
     {
         vec![]
     } else {
-        let mut fallback_items: Vec<&FileItem> = Vec::new();
+        let mut fallback_filenames: Vec<Cow<'_, str>> = Vec::new();
 
         for (i, path_match) in path_matches.iter().enumerate() {
             let file = working_files.index(path_match.index as usize);
@@ -212,35 +218,16 @@ fn match_and_score_in_arena<'a>(
 
             if match_start_approx < filename_start {
                 fallback_indices.push(i as u32);
-                fallback_items.push(file);
+                fallback_filenames.push(file.path.filename_cow(arena));
             }
         }
 
-        if fallback_items.is_empty() {
+        if fallback_filenames.is_empty() {
             vec![]
         } else {
-            let mut matches = neo_frizbee::match_list_parallel_resolved(
+            let mut matches = neo_frizbee::match_list_parallel(
                 fuzzy_parts[0],
-                &fallback_items,
-                &|item, chunk_buf| -> Option<(usize, u16)> {
-                    // pretty ugly way to express the map_init but it's fine for now
-                    // can't do stack here as the buffer needs to escape this region but can be one
-                    // per thread
-                    thread_local! {
-                        static SCRATCH: std::cell::UnsafeCell<SimdChunk> =
-                            const { std::cell::UnsafeCell::new(SimdChunk([0u8; crate::simd_path::SIMD_CHUNK_BYTES])) };
-                    }
-
-                    SCRATCH.with(|cell| {
-                        let scratch = unsafe { &mut (*cell.get()).0 };
-                        let (ptrs, fname_len) =
-                            item.path.resolve_filename_ptrs(arena, chunk_buf, scratch);
-                        if fname_len == 0 {
-                            return None;
-                        }
-                        Some((ptrs.len(), fname_len))
-                    })
-                },
+                &fallback_filenames,
                 &options,
                 if path_matches.len() > 4096 {
                     context.max_threads.div_ceil(2048)
@@ -254,9 +241,6 @@ fn match_and_score_in_arena<'a>(
         }
     };
 
-    let t2 = std::time::Instant::now();
-
-    let path_matches_count = path_matches.len();
     let mut next_filename_match_cursor = 0;
     let mut dir_buf = String::with_capacity(64);
     let mut fname_buf = String::with_capacity(32);
@@ -318,8 +302,13 @@ fn match_and_score_in_arena<'a>(
 
             let mut has_special_filename_bonus = false;
             let filename_bonus = if is_exact_filename {
-                base_score / 5 * 2
+                base_score / 5 * 2 // 40% bonus for exact filename match
             } else if is_filename_match {
+                // 16% bonus for fuzzy filename match that landed in the filename region.
+                // For fallback matches (where the path match landed in a directory segment),
+                // scale the bonus by the quality of the filename match — a contiguous match
+                // like "rename" in "rename.ts" gets the full bonus, while a scattered
+                // subsequence like r-e-n-a-m-e in "generateSessionName.ts" gets much less.
                 let max_bonus = (base_score / 6).min(30);
                 if let Some(fm) = simd_filename_match {
                     let max_possible = main_needle_len as i32 * 16;
@@ -330,6 +319,8 @@ fn match_and_score_in_arena<'a>(
                 }
             } else if !is_filename_match && (5..=11).contains(&fname_len) {
                 file.write_file_name_from_arena(arena, &mut fname_buf);
+                // 5% bonus for special file but not as much as file name to avoid situations
+                // when you have /user_service/server.rs and /user_service/server/mod.rs
                 if is_special_entry_point_file(&fname_buf) {
                     has_special_filename_bonus = true;
                     base_score * 5 / 100
@@ -433,25 +424,7 @@ fn match_and_score_in_arena<'a>(
         })
         .collect();
 
-    let t3 = std::time::Instant::now();
-
-    let result = sort_and_paginate(results, context);
-
-    let t4 = std::time::Instant::now();
-
-    // Log timing breakdown
-    tracing::info!(
-        "SCORE BREAKDOWN: match={:.3}ms fallback={:.3}ms score={:.3}ms sort={:.3}ms total={:.3}ms matches={} fallback_count={}",
-        (t1 - t0).as_secs_f64() * 1000.0,
-        (t2 - t1).as_secs_f64() * 1000.0,
-        (t3 - t2).as_secs_f64() * 1000.0,
-        (t4 - t3).as_secs_f64() * 1000.0,
-        (t4 - t0).as_secs_f64() * 1000.0,
-        path_matches_count,
-        fallback_indices.len(),
-    );
-
-    result
+    results
 }
 
 fn is_special_entry_point_file(filename: &str) -> bool {
@@ -481,7 +454,7 @@ fn score_filtered_by_frecency<'a>(
     files: &FileItems<'a>,
     context: &ScoringContext,
     arena: ArenaPtr,
-) -> (Vec<&'a FileItem>, Vec<Score>, usize) {
+) -> Vec<(&'a FileItem, Score)> {
     let score_file = |file: &'a FileItem| {
         let total_frecency_score = file.access_frecency_score as i32
             + (file.modification_frecency_score as i32).saturating_mul(4);
@@ -517,7 +490,7 @@ fn score_filtered_by_frecency<'a>(
         (file, score)
     };
 
-    let results: Vec<_> = match files {
+    match files {
         FileItems::All(s) => s
             .par_iter()
             .filter(|f| !f.is_deleted())
@@ -528,9 +501,7 @@ fn score_filtered_by_frecency<'a>(
             .filter(|f| !f.is_deleted())
             .map(|&file| score_file(file))
             .collect(),
-    };
-
-    sort_and_paginate(results, context)
+    }
 }
 
 #[inline]
@@ -864,7 +835,7 @@ mod filename_bonus_tests {
         (result, arena)
     }
 
-    /// Run `match_and_score_files` with production-like max_typos scaling.
+    /// Run `fuzzy_match_and_score_files` with production-like max_typos scaling.
     fn search(files: &[FileItem], query: &str, arena: ArenaPtr) -> Vec<(String, Score)> {
         let parser = QueryParser::default();
         let parsed = parser.parse(query);
@@ -891,7 +862,8 @@ mod filename_bonus_tests {
                 limit: 100,
             },
         };
-        let (items, scores, _) = match_and_score_files(files, &ctx, files.len(), arena, arena);
+        let (items, scores, _) =
+            fuzzy_match_and_score_files(files, &ctx, files.len(), arena, arena);
         items
             .iter()
             .zip(scores.iter())
@@ -1111,7 +1083,7 @@ mod typo_resistance_tests {
                 limit: 100,
             },
         };
-        let (items, _, _) = match_and_score_files(files, &ctx, files.len(), arena, arena);
+        let (items, _, _) = fuzzy_match_and_score_files(files, &ctx, files.len(), arena, arena);
         items
             .iter()
             .map(|f| f.relative_path_from_arena(arena))
@@ -1150,7 +1122,7 @@ mod typo_resistance_tests {
         // Concatenated query with typos — the real-world scenario.
         // "bidcomparsionsupplierpartcostmodfiers" is a smushed version of
         // "bid_comparison_supplier_part_cost_modifiers" with 2 typos
-        // (comparsion → comparison, modfiers → modifiers).
+        // (comparison → comparison, modifiers → modifiers).
         let results = search_with_typos(&files, "bidcomparsionsupplierpartcostmodfiers", arena, 6);
         assert!(
             results

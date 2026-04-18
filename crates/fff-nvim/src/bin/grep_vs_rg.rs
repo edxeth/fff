@@ -9,10 +9,10 @@ use fff::file_picker::FilePicker;
 /// - rg:  fork/exec + directory traversal + gitignore parsing + file opens per invocation
 ///
 /// Sections:
-///   1. Raw engine speed --- fff count-only vs rg --count-matches (N iterations)
-///   2. Full results     --- fff collect-all vs rg full line output (N iterations)
-///   3. First-page       --- fff paginated (50 results) vs rg telescope-style
-///      (spawn, stream 50 lines, kill) --- the real UI scenario (N iterations)
+///   1. Raw engine speed — fff count-only vs rg --count-matches (N iterations)
+///   2. Full results     — fff collect-all vs rg full line output (N iterations)
+///   3. First-page       — fff paginated (50 results) vs rg telescope-style
+///      (spawn, stream 50 lines, kill) — the real UI scenario (N iterations)
 ///
 /// The rg commands use telescope's default vimgrep_arguments:
 ///   rg --color=never --no-heading --with-filename --line-number --column --smart-case

@@ -42,16 +42,14 @@ impl FileItemFlags {
     /// Tombstone — file was deleted but index slot is preserved so
     /// bigram indices for other files stay valid.
     pub const DELETED: u8 = 1 << 1;
-    /// File was added after the last full reindex; its ChunkedString
-    /// indices point into the overflow builder arena, not the base arena.
+    /// File was added after the last full reindex; its indices point
+    /// into the overflow builder arena, not the base arena.
     pub const OVERFLOW: u8 = 1 << 2;
 }
 
 /// A directory in the file index. Shares chunk arena with file paths.
 #[derive(Debug, Clone)]
 pub struct DirItem {
-    /// Relative dir path (e.g. `src/components/`). Chunk indices point into
-    /// the same dedup'd arena as `FileItem.path`.
     pub(crate) path: crate::simd_path::ChunkedString,
 }
 
@@ -106,7 +104,7 @@ impl Clone for FileItem {
             modification_frecency_score: self.modification_frecency_score,
             git_status: self.git_status,
             flags: self.flags,
-            // on clone we have to reset the cointent lock
+            // on clone we have to reset the content lock
             content: OnceLock::new(),
         }
     }
@@ -562,9 +560,9 @@ impl Default for ContentCacheBudget {
     }
 }
 
+#[cfg(test)]
 impl FileItem {
     /// Leaks a single-file arena so the pointer stays valid forever.
-    #[doc(hidden)]
     pub fn new_for_test(
         rel_path: &str,
         size: u64,
@@ -577,8 +575,6 @@ impl FileItem {
         item
     }
 
-    /// Test helper returning both the item and leaked arena pointer.
-    #[doc(hidden)]
     pub(crate) fn new_for_test_with_arena(
         rel_path: &str,
         size: u64,

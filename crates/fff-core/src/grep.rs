@@ -994,11 +994,6 @@ pub(crate) fn multi_grep_search<'a>(
         if let Some(ref mut candidates) = combined
             && let Some(overlay) = bigram_overlay
         {
-            // Clear tombstoned files
-            for (r, t) in candidates.iter_mut().zip(overlay.tombstones().iter()) {
-                *r &= !t;
-            }
-            // Add modified files whose bigrams match any pattern
             for pattern in patterns {
                 let pattern_bigrams = extract_bigrams(pattern.as_bytes());
                 for file_idx in overlay.query_modified(&pattern_bigrams) {
@@ -1032,6 +1027,9 @@ pub(crate) fn multi_grep_search<'a>(
     if let Some(ref candidates) = bigram_candidates {
         let base_ptr = files.as_ptr();
         files_to_search.retain(|f| {
+            if f.is_overflow() {
+                return true;
+            }
             let file_idx = unsafe { (*f as *const FileItem).offset_from(base_ptr) as usize };
             BigramFilter::is_candidate(candidates, file_idx)
         });
@@ -1438,17 +1436,29 @@ fn prepare_files_to_search<'a>(
     let prefiltered: Vec<&FileItem> = if constraints.is_empty() {
         files
             .iter()
-            .filter(|f| !f.is_binary() && f.size > 0 && f.size <= options.max_file_size)
+            .filter(|f| {
+                !f.is_deleted() && !f.is_binary() && f.size > 0 && f.size <= options.max_file_size
+            })
             .collect()
     } else {
         match apply_constraints(files, constraints, arena) {
             Some(constrained) => constrained
                 .into_iter()
-                .filter(|f| !f.is_binary() && f.size > 0 && f.size <= options.max_file_size)
+                .filter(|f| {
+                    !f.is_deleted()
+                        && !f.is_binary()
+                        && f.size > 0
+                        && f.size <= options.max_file_size
+                })
                 .collect(),
             None => files
                 .iter()
-                .filter(|f| !f.is_binary() && f.size > 0 && f.size <= options.max_file_size)
+                .filter(|f| {
+                    !f.is_deleted()
+                        && !f.is_binary()
+                        && f.size > 0
+                        && f.size <= options.max_file_size
+                })
                 .collect(),
         }
     };
@@ -1889,6 +1899,7 @@ pub(crate) fn grep_search<'a>(
         GrepMode::Fuzzy => {
             let (mut files_to_search, mut filtered_file_count) =
                 prepare_files_to_search(files, constraints_from_query, options, arena);
+
             if files_to_search.is_empty()
                 && let Some(stripped) = strip_file_path_constraints(constraints_from_query)
             {
@@ -1897,6 +1908,7 @@ pub(crate) fn grep_search<'a>(
                 files_to_search = retry_files;
                 filtered_file_count = retry_count;
             }
+
             if files_to_search.is_empty() {
                 return GrepResult {
                     total_files,
@@ -1931,8 +1943,13 @@ pub(crate) fn grep_search<'a>(
 
                     let base_ptr = files.as_ptr();
                     files_to_search.retain(|f| {
+                        if f.is_overflow() {
+                            return true;
+                        }
+
                         let file_idx =
                             unsafe { (*f as *const FileItem).offset_from(base_ptr) as usize };
+
                         BigramFilter::is_candidate(&candidates, file_idx)
                     });
                 }
@@ -2042,6 +2059,7 @@ pub(crate) fn grep_search<'a>(
             let overflow_count = files.len().saturating_sub(overflow_start);
             let cap = BigramFilter::count_candidates(candidates) + overflow_count;
             let mut result: Vec<&FileItem> = Vec::with_capacity(cap);
+
             for (word_idx, &word) in candidates.iter().enumerate() {
                 if word == 0 {
                     continue;
@@ -2092,9 +2110,9 @@ pub(crate) fn grep_search<'a>(
             }
         }
         _ => {
-            // Constraints present or no bigram — full prepare then retain.
             let (mut fts, mut fc) =
                 prepare_files_to_search(files, constraints_from_query, options, arena);
+
             if fts.is_empty()
                 && let Some(stripped) = strip_file_path_constraints(constraints_from_query)
             {
@@ -2103,14 +2121,21 @@ pub(crate) fn grep_search<'a>(
                 fts = retry_files;
                 fc = retry_count;
             }
+
             if let Some(ref candidates) = bigram_candidates {
                 let base_ptr = files.as_ptr();
                 fts.retain(|f| {
+                    if f.is_overflow() {
+                        return true;
+                    }
+
+                    // we use ptr offsets to avoid additional allocations and keep the index
                     let file_idx =
                         unsafe { (*f as *const FileItem).offset_from(base_ptr) as usize };
                     BigramFilter::is_candidate(candidates, file_idx)
                 });
             }
+
             (fts, fc)
         }
     };
