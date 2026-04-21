@@ -1,31 +1,26 @@
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use fff::types::{ContentCacheBudget, FileItem};
-use fff::{BigramFilter, GrepMode, GrepSearchOptions, build_bigram_index, grep};
-use std::io::Read;
-use std::path::Path;
+use fff::file_picker::{FFFMode, FilePicker};
+use fff::{
+    FilePickerOptions, GrepMode, GrepSearchOptions, SharedFrecency, SharedPicker, parse_grep_query,
+};
 use std::sync::OnceLock;
 use std::time::Duration;
 
 struct TestData {
-    files: Vec<FileItem>,
-    bigram: BigramFilter,
-    budget: ContentCacheBudget,
+    shared_picker: SharedPicker,
 }
 
 static SETUP: OnceLock<TestData> = OnceLock::new();
 
-fn big_repo_path() -> std::path::PathBuf {
+fn big_repo_path() -> String {
     if let Some(path) = std::env::var_os("BIG_REPO_PATH") {
-        return std::path::PathBuf::from(path);
+        return path.to_string_lossy().into_owned();
     }
 
-    let candidates = [
-        std::path::PathBuf::from("./big-repo"),
-        std::path::PathBuf::from("../../big-repo"),
-    ];
+    let candidates = ["./big-repo", "../../big-repo"];
     for p in &candidates {
-        if p.exists() {
-            return p.clone();
+        if std::path::Path::new(p).exists() {
+            return p.to_string();
         }
     }
     panic!(
@@ -36,100 +31,66 @@ fn big_repo_path() -> std::path::PathBuf {
 
 fn setup() -> &'static TestData {
     SETUP.get_or_init(|| {
-        let repo = big_repo_path();
-        let canonical = fff::path_utils::canonicalize(&repo).expect("canonicalize");
+        let path = big_repo_path();
+        let shared_picker = SharedPicker::default();
+        let shared_frecency = SharedFrecency::default();
 
-        eprintln!("Loading files from {:?}...", canonical);
-        let mut files = load_files(&canonical);
-        let budget = ContentCacheBudget::new_for_repo(files.len());
+        eprintln!("Initializing FilePicker for {:?}...", path);
+        FilePicker::new_with_shared_state(
+            shared_picker.clone(),
+            shared_frecency.clone(),
+            FilePickerOptions {
+                base_path: path,
+                enable_mmap_cache: true,
+                enable_content_indexing: true,
+                mode: FFFMode::Neovim,
+                ..Default::default()
+            },
+        )
+        .expect("create picker");
 
-        // Warm the content cache so warm benchmarks hit OnceLock.
-        // Use unlimited budget for warmup — we want ALL files cached.
-        // The repo budget (5k cap for 93k files) would leave most uncached.
-        eprintln!("Warming content cache for {} files...", files.len());
-        {
-            let warmup_budget = ContentCacheBudget::unlimited();
-            let mut buf = Vec::with_capacity(64 * 1024);
-            for f in files.iter() {
-                let _ = f.get_content_for_search(&mut buf, &warmup_budget);
+        eprintln!("Waiting for scan completion...");
+        shared_picker.wait_for_scan(Duration::from_secs(120));
+
+        eprintln!("Waiting for warmup (bigram index)...");
+        loop {
+            let guard = shared_picker.read().expect("read lock");
+            let picker = guard.as_ref().expect("picker present");
+            let progress = picker.get_scan_progress();
+            if progress.is_warmup_complete {
+                let file_count = picker.get_files().len();
+                eprintln!("Ready: {} files indexed, bigram built", file_count);
+                break;
             }
+            drop(guard);
+            std::thread::sleep(Duration::from_millis(100));
         }
 
-        eprintln!("Building bigram index...");
-        let (bigram, binary_indices) = build_bigram_index(&files, &budget);
-        for &i in &binary_indices {
-            files[i].set_binary(true);
-        }
-
-        let non_binary = files.iter().filter(|f| !f.is_binary()).count();
-        eprintln!(
-            "Ready: {} files ({} non-binary), bigram {:.1} MB",
-            files.len(),
-            non_binary,
-            bigram.heap_bytes() as f64 / (1024.0 * 1024.0),
-        );
-
-        TestData {
-            files,
-            bigram,
-            budget,
-        }
+        TestData { shared_picker }
     })
 }
 
-fn load_files(base_path: &Path) -> Vec<FileItem> {
-    use ignore::WalkBuilder;
+fn setup_cold() -> SharedPicker {
+    let path = big_repo_path();
+    let shared_picker = SharedPicker::default();
+    let shared_frecency = SharedFrecency::default();
 
-    let mut files = Vec::new();
-    WalkBuilder::new(base_path)
-        .hidden(false)
-        .git_ignore(true)
-        .git_exclude(true)
-        .git_global(true)
-        .ignore(true)
-        .follow_links(false)
-        .build()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_some_and(|ft| ft.is_file()))
-        .for_each(|entry| {
-            let path = entry.path().to_path_buf();
-            let relative = pathdiff::diff_paths(&path, base_path).unwrap_or_else(|| path.clone());
-            let relative_path = relative.to_string_lossy().into_owned();
-            let size = entry.metadata().ok().map_or(0, |m| m.len());
-            let is_binary = detect_binary(&path, size);
+    FilePicker::new_with_shared_state(
+        shared_picker.clone(),
+        shared_frecency.clone(),
+        FilePickerOptions {
+            base_path: path,
+            enable_mmap_cache: false,
+            enable_content_indexing: false,
+            mode: FFFMode::Neovim,
+            watch: false,
+            ..Default::default()
+        },
+    )
+    .expect("create picker");
 
-            let path_string = path.to_string_lossy().into_owned();
-            let relative_start = (path_string.len() - relative_path.len()) as u16;
-            let filename_start = path_string
-                .rfind(std::path::is_separator)
-                .map(|i| i + 1)
-                .unwrap_or(relative_start as usize) as u16;
-
-            files.push(FileItem::new_raw(
-                path_string,
-                relative_start,
-                filename_start,
-                size,
-                0,
-                None,
-                is_binary,
-            ));
-        });
-
-    files
-}
-
-fn detect_binary(path: &Path, size: u64) -> bool {
-    if size == 0 {
-        return false;
-    }
-    let Ok(file) = std::fs::File::open(path) else {
-        return false;
-    };
-    let mut reader = std::io::BufReader::with_capacity(1024, file);
-    let mut buf = [0u8; 512];
-    let n = reader.read(&mut buf).unwrap_or(0);
-    buf[..n].contains(&0)
+    shared_picker.wait_for_scan(Duration::from_secs(120));
+    shared_picker
 }
 
 fn plain_options() -> GrepSearchOptions {
@@ -145,6 +106,7 @@ fn plain_options() -> GrepSearchOptions {
         after_context: 0,
         classify_definitions: false,
         trim_whitespace: false,
+        ..Default::default()
     }
 }
 
@@ -155,100 +117,54 @@ fn fuzzy_options() -> GrepSearchOptions {
     }
 }
 
-fn do_grep(
-    files: &[FileItem],
-    query: &str,
-    options: &GrepSearchOptions,
-    budget: &ContentCacheBudget,
-    bigram: Option<&BigramFilter>,
-) -> usize {
-    let parsed = grep::parse_grep_query(query);
-    let result = grep::grep_search(
-        black_box(files),
-        black_box(&parsed),
-        black_box(options),
-        budget,
-        bigram,
-        None,
-        None,
-    );
-    result.matches.len()
-}
+const PLAIN_QUERIES: &[(&str, &str)] = &[
+    ("2char_if", "if"),
+    ("common_return", "return"),
+    ("func_mutex_lock", "mutex_lock"),
+    ("struct_inode_ops", "inode_operations"),
+    ("define_MODULE_LICENSE", "MODULE_LICENSE"),
+    ("rare_phylink_ethtool", "phylink_ethtool"),
+    ("include", "#include"),
+    ("comment_TODO", "TODO"),
+    ("type_struct_file", "struct file"),
+    ("error_EINVAL", "err = -EINVAL"),
+    ("long_static_int_init", "static int __init"),
+    ("very_common_int", "int"),
+    ("single_char_x", "x"),
+    ("path_printk_c", "printk *.c"),
+    ("dir_mutex_kernel", "mutex /kernel/"),
+];
+
+const FUZZY_QUERIES: &[(&str, &str)] = &[
+    ("exact_mutex_lock", "mutex_lock"),
+    ("typo_mutx_lock", "mutx_lock"),
+    ("camel_InodeOps", "InodeOps"),
+    ("abbrev_sched_rt", "sched_rt"),
+    ("short_kfr", "kfr"),
+    ("common_return", "return"),
+    ("define_MODULE_LICENSE", "MODULE_LICENSE"),
+    ("struct_file_ops", "file_operations"),
+    ("long_static_int_init", "static_int_init"),
+    ("path_printk_c", "printk *.c"),
+];
 
 fn bench_plain_warm(c: &mut Criterion) {
-    let test_picker = setup();
+    let data = setup();
     let opts = plain_options();
-
-    let queries: &[(&str, &str)] = &[
-        ("2char_if", "if"),
-        ("common_return", "return"),
-        ("func_mutex_lock", "mutex_lock"),
-        ("struct_inode_ops", "inode_operations"),
-        ("define_MODULE_LICENSE", "MODULE_LICENSE"),
-        ("rare_phylink_ethtool", "phylink_ethtool"),
-        ("include", "#include"),
-        ("comment_TODO", "TODO"),
-        ("type_struct_file", "struct file"),
-        ("error_EINVAL", "err = -EINVAL"),
-        ("long_static_int_init", "static int __init"),
-        ("very_common_int", "int"),
-        ("single_char_x", "x"),
-        ("path_printk_c", "printk *.c"),
-        ("dir_mutex_kernel", "mutex /kernel/"),
-    ];
 
     let mut group = c.benchmark_group("plain_warm");
     group.sample_size(30);
     group.warm_up_time(Duration::from_secs(2));
     group.measurement_time(Duration::from_secs(5));
 
-    for (name, query) in queries {
+    for (name, query) in PLAIN_QUERIES {
         group.bench_with_input(BenchmarkId::from_parameter(name), query, |b, q| {
-            b.iter(|| do_grep(&test_picker.files, q, &opts, &test_picker.budget, None))
-        });
-    }
-
-    group.finish();
-}
-
-fn bench_bigram_warm(c: &mut Criterion) {
-    let test_picker = setup();
-    let opts = plain_options();
-
-    let queries: &[(&str, &str)] = &[
-        ("2char_if", "if"),
-        ("common_return", "return"),
-        ("func_mutex_lock", "mutex_lock"),
-        ("struct_inode_ops", "inode_operations"),
-        ("define_MODULE_LICENSE", "MODULE_LICENSE"),
-        ("rare_phylink_ethtool", "phylink_ethtool"),
-        ("include", "#include"),
-        ("comment_TODO", "TODO"),
-        ("type_struct_file", "struct file"),
-        ("error_EINVAL", "err = -EINVAL"),
-        ("long_static_int_init", "static int __init"),
-        ("very_common_int", "int"),
-        ("single_char_x", "x"),
-        ("path_printk_c", "printk *.c"),
-        ("dir_mutex_kernel", "mutex /kernel/"),
-    ];
-
-    let mut group = c.benchmark_group("bigram_warm");
-    group.sample_size(30);
-    group.warm_up_time(Duration::from_secs(2));
-    group.measurement_time(Duration::from_secs(5));
-
-    for (name, query) in queries {
-        group.bench_with_input(BenchmarkId::from_parameter(name), query, |b, q| {
+            let guard = data.shared_picker.read().expect("read lock");
+            let picker = guard.as_ref().expect("picker present");
             b.iter(|| {
-                do_grep(
-                    &test_picker.files,
-                    q,
-                    &opts,
-                    &test_picker.budget,
-                    Some(&test_picker.bigram),
-                )
-            })
+                let parsed = parse_grep_query(q);
+                black_box(picker.grep(&parsed, &opts))
+            });
         });
     }
 
@@ -256,69 +172,22 @@ fn bench_bigram_warm(c: &mut Criterion) {
 }
 
 fn bench_fuzzy_warm(c: &mut Criterion) {
-    let test_picker = setup();
+    let data = setup();
     let opts = fuzzy_options();
-
-    let queries: &[(&str, &str)] = &[
-        ("exact_mutex_lock", "mutex_lock"),
-        ("typo_mutx_lock", "mutx_lock"),
-        ("camel_InodeOps", "InodeOps"),
-        ("abbrev_sched_rt", "sched_rt"),
-        ("short_kfr", "kfr"),
-        ("common_return", "return"),
-        ("define_MODULE_LICENSE", "MODULE_LICENSE"),
-        ("struct_file_ops", "file_operations"),
-        ("long_static_int_init", "static_int_init"),
-        ("path_printk_c", "printk *.c"),
-    ];
 
     let mut group = c.benchmark_group("fuzzy_warm");
     group.sample_size(10);
     group.warm_up_time(Duration::from_secs(2));
     group.measurement_time(Duration::from_secs(8));
 
-    for (name, query) in queries {
+    for (name, query) in FUZZY_QUERIES {
         group.bench_with_input(BenchmarkId::from_parameter(name), query, |b, q| {
-            b.iter(|| do_grep(&test_picker.files, q, &opts, &test_picker.budget, None))
-        });
-    }
-
-    group.finish();
-}
-
-fn bench_fuzzy_bigram_warm(c: &mut Criterion) {
-    let test_picker = setup();
-    let opts = fuzzy_options();
-
-    let queries: &[(&str, &str)] = &[
-        ("exact_mutex_lock", "mutex_lock"),
-        ("typo_mutx_lock", "mutx_lock"),
-        ("camel_InodeOps", "InodeOps"),
-        ("abbrev_sched_rt", "sched_rt"),
-        ("short_kfr", "kfr"),
-        ("common_return", "return"),
-        ("define_MODULE_LICENSE", "MODULE_LICENSE"),
-        ("struct_file_ops", "file_operations"),
-        ("long_static_int_init", "static_int_init"),
-        ("path_printk_c", "printk *.c"),
-    ];
-
-    let mut group = c.benchmark_group("fuzzy_bigram_warm");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_secs(2));
-    group.measurement_time(Duration::from_secs(8));
-
-    for (name, query) in queries {
-        group.bench_with_input(BenchmarkId::from_parameter(name), query, |b, q| {
+            let guard = data.shared_picker.read().expect("read lock");
+            let picker = guard.as_ref().expect("picker present");
             b.iter(|| {
-                do_grep(
-                    &test_picker.files,
-                    q,
-                    &opts,
-                    &test_picker.budget,
-                    Some(&test_picker.bigram),
-                )
-            })
+                let parsed = parse_grep_query(q);
+                black_box(picker.grep(&parsed, &opts))
+            });
         });
     }
 
@@ -326,7 +195,7 @@ fn bench_fuzzy_bigram_warm(c: &mut Criterion) {
 }
 
 fn bench_plain_cold(c: &mut Criterion) {
-    let test_picker = setup();
+    let _ = setup();
     let opts = plain_options();
 
     let queries: &[(&str, &str)] = &[
@@ -344,13 +213,17 @@ fn bench_plain_cold(c: &mut Criterion) {
     group.warm_up_time(Duration::from_millis(500));
     group.measurement_time(Duration::from_secs(10));
 
-    let canonical = fff::path_utils::canonicalize(&big_repo_path()).expect("canonicalize");
-
     for (name, query) in queries {
         group.bench_with_input(BenchmarkId::from_parameter(name), query, |b, q| {
             b.iter_with_setup(
-                || load_files(&canonical),
-                |fresh_files| do_grep(&fresh_files, q, &opts, &test_picker.budget, None),
+                || setup_cold(),
+                |cold_picker| {
+                    let guard = cold_picker.read().expect("read lock");
+                    let picker = guard.as_ref().expect("picker present");
+                    let parsed = parse_grep_query(q);
+                    let result = picker.grep(&parsed, &opts);
+                    black_box(result.matches.len())
+                },
             );
         });
     }
@@ -361,9 +234,7 @@ fn bench_plain_cold(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_plain_warm,
-    bench_bigram_warm,
     bench_fuzzy_warm,
-    bench_fuzzy_bigram_warm,
     bench_plain_cold,
 );
 
