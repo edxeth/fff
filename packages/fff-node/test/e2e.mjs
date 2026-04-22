@@ -132,9 +132,11 @@ describe("fff-node", { concurrency: 1 }, () => {
 
   describe("grep", { concurrency: 1 }, () => {
     it("finds FffResult in Rust sources", () => {
-      const r = finder.grep("FffResult", { mode: "plain" });
+      // Constrain to .rs files so the assertion doesn't depend on result ordering
+      // or content-indexing timing for other file types.
+      const r = finder.grep("*.rs FffResult", { mode: "plain" });
       assert.ok(r.ok, `grep failed: ${!r.ok ? r.error : ""}`);
-      assert.ok(r.value.items.length > 0);
+      assert.ok(r.value.items.length > 0, "expected at least one .rs match");
       assert.ok(r.value.items.some((m) => m.relativePath.endsWith(".rs")));
     });
 
