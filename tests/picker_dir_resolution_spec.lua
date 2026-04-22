@@ -9,11 +9,21 @@ local fff_rust = require('fff.rust')
 local picker_ui = require('fff.picker_ui')
 local file_picker = require('fff.file_picker')
 
---- Normalise a path so that comparisons work on every OS (Windows Rust
---- may return forward-slash paths while vim.fn.resolve uses backslashes).
+--- Normalise a path so that comparisons work on every OS.
+--- Windows complicates things: Rust may return forward-slash paths while
+--- vim.fn.resolve uses backslashes, temp paths may contain 8.3 short names
+--- (RUNNER~1), and the filesystem is case-insensitive.
 --- @param p string
 --- @return string
-local function norm(p) return vim.fs.normalize(vim.fn.resolve(p)) end
+local function norm(p)
+  -- :p makes absolute, resolve follows symlinks & expands 8.3 names on Windows
+  local n = vim.fs.normalize(vim.fn.fnamemodify(vim.fn.resolve(p), ':p'))
+  -- Strip trailing slash for consistent comparison
+  n = n:gsub('/$', '')
+  -- Case-fold on Windows (drive letters, 8.3 short names, etc.)
+  if vim.fn.has('win32') == 1 then n = n:lower() end
+  return n
+end
 
 --- `change_indexing_directory` swaps the picker on a background thread, so the
 --- `FILE_PICKER` global may still point at the *old* picker for a moment —
