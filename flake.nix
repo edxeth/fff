@@ -61,6 +61,17 @@
             openssl
           ];
           LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+
+          # Zig 0.16 insists on writing to its global cache even when the
+          # zlob build.rs passes --global-cache-dir. In the nix sandbox $HOME
+          # is /homeless-shelter (unwritable), so redirect to $TMPDIR before
+          # the build phase runs.
+          preBuild = ''
+            export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-global-cache"
+            export ZIG_LOCAL_CACHE_DIR="$TMPDIR/zig-local-cache"
+            export XDG_CACHE_HOME="$TMPDIR/cache"
+            mkdir -p "$ZIG_GLOBAL_CACHE_DIR" "$ZIG_LOCAL_CACHE_DIR" "$XDG_CACHE_HOME"
+          '';
         };
 
         my-crate = craneLib.buildPackage (
