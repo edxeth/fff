@@ -66,7 +66,7 @@ The MCP server gives any agent a file search tool that is faster and more token-
 ### Install
 
 ```bash
-pi extension add @ff-labs/pi-fff
+pi install npm:@ff-labs/pi-fff
 ```
 
 ### Modes
