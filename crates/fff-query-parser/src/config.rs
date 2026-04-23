@@ -91,6 +91,15 @@ pub trait ParserConfig {
         has_wildcards(token)
     }
 
+    /// When `true`, a PathSegment constraint that is the ONLY token in the
+    /// query is demoted to fuzzy text. Grep modes enable this because the
+    /// user is typing a search term (e.g. `/api/tests`), not scoping to a
+    /// directory. File-search modes keep the default (`false`) so that
+    /// `/src/` still filters by directory.
+    fn treat_lone_path_as_text(&self) -> bool {
+        false
+    }
+
     /// Custom constraint parsers for picker-specific needs
     fn parse_custom<'a>(&self, _input: &'a str) -> Option<Constraint<'a>> {
         None
@@ -135,6 +144,10 @@ impl ParserConfig for GrepConfig {
 
     fn enable_location(&self) -> bool {
         false
+    }
+
+    fn treat_lone_path_as_text(&self) -> bool {
+        true
     }
 
     /// Only recognise globs that are clearly directory/path oriented.
@@ -207,6 +220,10 @@ impl ParserConfig for AiGrepConfig {
 
     fn enable_location(&self) -> bool {
         false
+    }
+
+    fn treat_lone_path_as_text(&self) -> bool {
+        true
     }
 
     fn is_glob_pattern(&self, token: &str) -> bool {

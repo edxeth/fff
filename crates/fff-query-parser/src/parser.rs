@@ -61,7 +61,15 @@ impl<C: ParserConfig> QueryParser<C> {
                         .rev()
                         .take_while(|&b| b != b':')
                         .all(|b| b.is_ascii_digit());
-                if !matches!(constraint, Constraint::FilePath(_)) && !has_location_suffix {
+
+                // for grep we don't want to treat a part of path like pathname
+                let treat_as_text = matches!(constraint, Constraint::PathSegment(_))
+                    && config.treat_lone_path_as_text();
+
+                if !matches!(constraint, Constraint::FilePath(_))
+                    && !has_location_suffix
+                    && !treat_as_text
+                {
                     constraints.push(constraint);
                     return FFFQuery {
                         raw_query,
@@ -956,6 +964,111 @@ mod tests {
             result.constraints
         );
         assert_eq!(result.grep_text(), "profile.h");
+    }
+
+    #[test]
+    fn test_ai_grep_leading_slash_path_alone_is_text_not_path_segment() {
+        // A leading-slash multi-segment path like `/api/tests/` or `/api/tests`
+        // used as the sole query token should be treated as fuzzy text, NOT as
+        // a PathSegment constraint. The user is searching for files matching
+        // that path string, not trying to scope results to a directory.
+        use crate::AiGrepConfig;
+        let parser = QueryParser::new(AiGrepConfig);
+
+        // With trailing slash
+        let result = parser.parse("/api/tests/");
+        assert_eq!(
+            result.constraints.len(),
+            0,
+            "Expected no constraints for '/api/tests/', got {:?}",
+            result.constraints
+        );
+        assert!(
+            matches!(result.fuzzy_query, FuzzyQuery::Text("/api/tests/")),
+            "Expected FuzzyQuery::Text, got {:?}",
+            result.fuzzy_query
+        );
+
+        // Without trailing slash
+        let result = parser.parse("/api/tests");
+        assert_eq!(
+            result.constraints.len(),
+            0,
+            "Expected no constraints for '/api/tests', got {:?}",
+            result.constraints
+        );
+        assert!(
+            matches!(result.fuzzy_query, FuzzyQuery::Text("/api/tests")),
+            "Expected FuzzyQuery::Text, got {:?}",
+            result.fuzzy_query
+        );
+    }
+
+    #[test]
+    fn test_grep_leading_slash_path_alone_is_text_not_path_segment() {
+        // Same behavior for regular GrepConfig — single-token path-like
+        // queries are search terms, not directory filters.
+        let parser = QueryParser::new(GrepConfig);
+
+        let result = parser.parse("/api/tests/");
+        assert_eq!(
+            result.constraints.len(),
+            0,
+            "GrepConfig: expected no constraints for '/api/tests/', got {:?}",
+            result.constraints
+        );
+        assert!(
+            matches!(result.fuzzy_query, FuzzyQuery::Text("/api/tests/")),
+            "GrepConfig: expected FuzzyQuery::Text, got {:?}",
+            result.fuzzy_query
+        );
+
+        let result = parser.parse("/api/tests");
+        assert_eq!(
+            result.constraints.len(),
+            0,
+            "GrepConfig: expected no constraints for '/api/tests', got {:?}",
+            result.constraints
+        );
+        assert!(
+            matches!(result.fuzzy_query, FuzzyQuery::Text("/api/tests")),
+            "GrepConfig: expected FuzzyQuery::Text, got {:?}",
+            result.fuzzy_query
+        );
+    }
+
+    #[test]
+    fn test_file_search_leading_slash_path_alone_stays_path_segment() {
+        // FileSearchConfig (fuzzy file finder) should still treat a lone
+        // `/api/tests/` as a PathSegment constraint — the user is scoping
+        // the file list to that directory.
+        let parser = QueryParser::new(FileSearchConfig);
+
+        let result = parser.parse("/api/tests/");
+        assert_eq!(
+            result.constraints.len(),
+            1,
+            "FileSearchConfig: expected PathSegment constraint, got {:?}",
+            result.constraints
+        );
+        assert!(
+            matches!(result.constraints[0], Constraint::PathSegment("api/tests")),
+            "FileSearchConfig: expected PathSegment(\"api/tests\"), got {:?}",
+            result.constraints[0]
+        );
+
+        let result = parser.parse("/api/tests");
+        assert_eq!(
+            result.constraints.len(),
+            1,
+            "FileSearchConfig: expected PathSegment constraint, got {:?}",
+            result.constraints
+        );
+        assert!(
+            matches!(result.constraints[0], Constraint::PathSegment("api/tests")),
+            "FileSearchConfig: expected PathSegment(\"api/tests\"), got {:?}",
+            result.constraints[0]
+        );
     }
 
     #[test]
