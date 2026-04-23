@@ -72,7 +72,7 @@ Pi agent extension ~
 INSTALL ~
 
 >bash
-    pi extension add @ff-labs/pi-fff
+    pi install npm:@ff-labs/pi-fff
 <
 
 
