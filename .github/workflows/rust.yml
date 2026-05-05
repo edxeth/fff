@@ -25,10 +25,10 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
-      
+
       # Zig is required to compile zlob
       - name: Install Zig
-        uses: goto-bus-stop/setup-zig@v2
+        uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
 
@@ -59,7 +59,7 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Install Zig
-        uses: goto-bus-stop/setup-zig@v2
+        uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
 
@@ -113,10 +113,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      
+
       # Zig is required to compile zlob
       - name: Install Zig
-        uses: goto-bus-stop/setup-zig@v2
+        uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
 
@@ -125,6 +125,6 @@ jobs:
         with:
           toolchain: stable
           components: clippy
-          
+
       - name: Run clippy
         run: cargo clippy -- -D warnings
