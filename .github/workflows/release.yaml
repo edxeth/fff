@@ -59,15 +59,6 @@ jobs:
             artifact_name: target/aarch64-apple-darwin/ci/libfff_nvim.dylib
             ext: dylib
 
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact_name: target/x86_64-pc-windows-msvc/ci/fff_nvim.dll
-            ext: dll
-          - os: windows-latest
-            target: aarch64-pc-windows-msvc
-            artifact_name: target/aarch64-pc-windows-msvc/ci/fff_nvim.dll
-            ext: dll
-
     steps:
       - uses: actions/checkout@v5
         with:
@@ -114,13 +105,6 @@ jobs:
       - name: Ad-hoc sign macOS binary
         if: contains(matrix.os, 'macos')
         run: codesign --force --sign - "${{ matrix.target }}.${{ matrix.ext }}"
-
-      - name: Build for Windows
-        if: contains(matrix.os, 'windows')
-        shell: bash
-        run: |
-          cargo build --profile ci --target ${{ matrix.target }} -p fff-nvim --features zlob
-          mv "${{ matrix.artifact_name }}" "${{ matrix.target }}.${{ matrix.ext }}"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -185,20 +169,6 @@ jobs:
             lib_filename: libfff_c.dylib
             ext: dylib
 
-          ## Windows builds
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact_name: target/x86_64-pc-windows-msvc/ci/fff_c.dll
-            npm_package: fff-bin-win32-x64
-            lib_filename: fff_c.dll
-            ext: dll
-          - os: windows-latest
-            target: aarch64-pc-windows-msvc
-            artifact_name: target/aarch64-pc-windows-msvc/ci/fff_c.dll
-            npm_package: fff-bin-win32-arm64
-            lib_filename: fff_c.dll
-            ext: dll
-
     steps:
       - uses: actions/checkout@v5
         with:
@@ -244,13 +214,6 @@ jobs:
       - name: Ad-hoc sign macOS binary
         if: contains(matrix.os, 'macos')
         run: codesign --force --sign - "c-lib-${{ matrix.target }}.${{ matrix.ext }}"
-
-      - name: Build for Windows
-        if: contains(matrix.os, 'windows')
-        shell: bash
-        run: |
-          cargo build --profile ci --target ${{ matrix.target }} -p fff-c --features zlob
-          mv "${{ matrix.artifact_name }}" "c-lib-${{ matrix.target }}.${{ matrix.ext }}"
 
       - name: Prepare npm package
         if: "!contains(matrix.target, 'android')"
@@ -304,14 +267,6 @@ jobs:
             target: aarch64-apple-darwin
             artifact_name: target/aarch64-apple-darwin/ci/fff-mcp
 
-          ## Windows builds
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact_name: target/x86_64-pc-windows-msvc/ci/fff-mcp.exe
-          - os: windows-latest
-            target: aarch64-pc-windows-msvc
-            artifact_name: target/aarch64-pc-windows-msvc/ci/fff-mcp.exe
-
     steps:
       - uses: actions/checkout@v5
         with:
@@ -344,13 +299,6 @@ jobs:
       - name: Ad-hoc sign macOS binary
         if: contains(matrix.os, 'macos')
         run: codesign --force --sign - "fff-mcp-${{ matrix.target }}"
-
-      - name: Build for Windows
-        if: contains(matrix.os, 'windows')
-        shell: bash
-        run: |
-          cargo build --profile ci --target ${{ matrix.target }} -p fff-mcp --features zlob
-          cp "${{ matrix.artifact_name }}" "fff-mcp-${{ matrix.target }}.exe"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -453,10 +401,10 @@ jobs:
             ${{ steps.version.outputs.is_release == 'true' && format('Release {0}', steps.version.outputs.version) || format('Nightly release from commit: {0}', github.sha) }}
 
             ## Neovim Plugin
-            - `{target}.so` / `.dylib` / `.dll` - Lua module for Neovim
+            - `{target}.so` / `.dylib` - Lua module for Neovim
 
             ## C FFI Library (for Bun/Node/Python)
-            - `c-lib-{target}.so` / `.dylib` / `.dll` - C FFI library
+            - `c-lib-{target}.so` / `.dylib` - C FFI library
 
             ## MCP Server
             - `fff-mcp-{target}` - MCP server binary
@@ -471,8 +419,9 @@ jobs:
     needs: [build-nvim, build-c, build-mcp]
     runs-on: ubuntu-latest
     if: >-
-      (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fix/download-version' || startsWith(github.ref, 'refs/tags/v')))
-      || (github.event_name == 'pull_request' && github.head_ref == 'main')
+      github.repository == 'dmtrKovalenko/fff'
+      && ((github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fix/download-version' || startsWith(github.ref, 'refs/tags/v')))
+      || (github.event_name == 'pull_request' && github.head_ref == 'main'))
 
     steps:
       - uses: actions/checkout@v5
@@ -500,8 +449,9 @@ jobs:
     needs: [build-c]
     runs-on: ubuntu-latest
     if: >-
-      (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fix/download-version' || startsWith(github.ref, 'refs/tags/v')))
-      || (github.event_name == 'pull_request' && github.head_ref == 'main')
+      github.repository == 'dmtrKovalenko/fff'
+      && ((github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fix/download-version' || startsWith(github.ref, 'refs/tags/v')))
+      || (github.event_name == 'pull_request' && github.head_ref == 'main'))
     permissions:
       contents: read
     steps:
