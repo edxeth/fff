@@ -5,22 +5,25 @@
  * @-mention autocomplete suggestions in the interactive editor.
  */
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { CustomEditor } from "@mariozechner/pi-coding-agent";
-import {
-  Text,
-  type AutocompleteItem,
-  type AutocompleteProvider,
-} from "@mariozechner/pi-tui";
-import { Type } from "@sinclair/typebox";
-import { FileFinder } from "@ff-labs/fff-node";
+import { execSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 import type {
   GrepCursor,
   GrepMode,
   GrepResult,
-  SearchResult,
   MixedItem,
+  SearchResult,
 } from "@ff-labs/fff-node";
+import { FileFinder } from "@ff-labs/fff-node";
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { CustomEditor } from "@mariozechner/pi-coding-agent";
+import {
+  type AutocompleteItem,
+  type AutocompleteProvider,
+  Text,
+} from "@mariozechner/pi-tui";
+import { Type } from "@sinclair/typebox";
 import { buildQuery } from "./query";
 
 // ---------------------------------------------------------------------------
@@ -29,6 +32,7 @@ import { buildQuery } from "./query";
 
 const DEFAULT_GREP_LIMIT = 20;
 const DEFAULT_FIND_LIMIT = 30;
+const MAX_CACHED_FINDERS = 4;
 const GREP_MAX_LINE_LENGTH = 500;
 const MENTION_MAX_RESULTS = 20;
 
@@ -82,6 +86,7 @@ function getCursor(id: string): GrepCursor | undefined {
 // pageIndex/pageSize, so the cursor is just the next page index paired with
 // the query+limit that produced it. Stored tokens are opaque IDs to the agent.
 interface FindCursor {
+  basePath: string;
   query: string;
   pattern: string;
   pageSize: number;
@@ -156,7 +161,7 @@ function formatGrepOutput(result: GrepResult): string {
   // This preserves native frecency ordering across files without re-sorting.
   const lines: string[] = [];
   let currentFile = "";
-  let shown = 0;
+  let _shown = 0;
 
   for (const match of result.items) {
     if (match.relativePath !== currentFile) {
@@ -171,7 +176,7 @@ function formatGrepOutput(result: GrepResult): string {
     });
 
     lines.push(` ${match.lineNumber}: ${truncateLine(match.lineContent)}`);
-    shown++;
+    _shown++;
 
     match.contextAfter?.forEach((line: string, i: number) => {
       const lineNum = match.lineNumber + 1 + i;
@@ -256,9 +261,7 @@ function createFffMentionProvider(
 
       const query = prefix.startsWith('@"') ? prefix.slice(2) : prefix.slice(1);
       const items = await getItems(query, options.signal);
-      return options.signal.aborted || items.length === 0
-        ? null
-        : { items, prefix };
+      return options.signal.aborted || items.length === 0 ? null : { items, prefix };
     },
     applyCompletion(_lines, cursorLine, cursorCol, item, prefix) {
       const currentLine = _lines[cursorLine] || "";
@@ -267,11 +270,7 @@ function createFffMentionProvider(
       const newLine = before + item.value + after;
       const newCursorCol = cursorCol - prefix.length + item.value.length;
       return {
-        lines: [
-          ..._lines.slice(0, cursorLine),
-          newLine,
-          ..._lines.slice(cursorLine + 1),
-        ],
+        lines: [..._lines.slice(0, cursorLine), newLine, ..._lines.slice(cursorLine + 1)],
         cursorLine,
         cursorCol: newCursorCol,
       };
@@ -290,13 +289,13 @@ function createFffMentionProvider(
 // ---------------------------------------------------------------------------
 
 export default function fffExtension(pi: ExtensionAPI) {
-  let finder: FileFinder | null = null;
-  let finderCwd: string | null = null;
-  // Concurrent ensureFinder() callers share the same in-flight promise so
+  const finders = new Map<string, FileFinder>();
+  let activeBasePath: string | null = null;
+  // Concurrent ensureFinder() callers share in-flight promises by base path so
   // FileFinder.create() (which takes native DB locks) runs at most once per
   // base path at a time — otherwise parallel tool calls would race and
   // deadlock at the native layer (issue #403).
-  let finderPromise: Promise<FileFinder> | null = null;
+  const finderPromises = new Map<string, Promise<FileFinder>>();
   let activeCwd = process.cwd();
 
   // Mode resolution: flag > env > default
@@ -329,45 +328,122 @@ export default function fffExtension(pi: ExtensionAPI) {
     return currentMode !== "tools-only";
   }
 
-  function ensureFinder(cwd: string): Promise<FileFinder> {
-    if (finder && !finder.isDestroyed && finderCwd === cwd)
-      return Promise.resolve(finder);
-    if (finderPromise) return finderPromise;
+  function resolveGitRoot(dir: string): string | null {
+    try {
+      const root = execSync("git rev-parse --show-toplevel", {
+        cwd: dir,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+        timeout: 3000,
+      }).trim();
+      return root || null;
+    } catch {
+      return null;
+    }
+  }
 
-    finderPromise = (async () => {
-      if (finder && !finder.isDestroyed) {
-        finder.destroy();
-        finder = null;
-        finderCwd = null;
-      }
+  function invalidPathMessage(pathConstraint: string, cwd = activeCwd): string | null {
+    const absolute = path.isAbsolute(pathConstraint)
+      ? pathConstraint
+      : path.resolve(cwd, pathConstraint);
+    const wildcard = absolute.search(/[*?[{]/);
+    const concrete = wildcard === -1 ? absolute : absolute.slice(0, wildcard);
+    const concreteDir = concrete.endsWith(path.sep)
+      ? concrete.slice(0, -1)
+      : path.dirname(concrete);
+    const statPath = wildcard === -1 ? absolute : concreteDir;
+    return fs.existsSync(statPath)
+      ? null
+      : `Path not found: ${statPath || pathConstraint}`;
+  }
 
+  function absolutePathBase(pathConstraint: string): {
+    basePath: string;
+    pathConstraint?: string;
+  } {
+    const wildcard = pathConstraint.search(/[*?[{]/);
+    const hasWildcard = wildcard !== -1;
+    const concrete = hasWildcard ? pathConstraint.slice(0, wildcard) : pathConstraint;
+    const concreteDir = concrete.endsWith(path.sep)
+      ? concrete.slice(0, -1)
+      : path.dirname(concrete);
+    const statPath = hasWildcard ? concreteDir : pathConstraint;
+    const isDir = fs.existsSync(statPath) && fs.statSync(statPath).isDirectory();
+    const fallbackBase = isDir ? statPath : path.dirname(statPath);
+    const gitRoot = resolveGitRoot(fallbackBase);
+    const basePath = gitRoot ?? fallbackBase;
+    const relative = path.relative(basePath, pathConstraint).replaceAll(path.sep, "/");
+    const pathValue =
+      relative && relative !== "**" && relative !== "**/*" ? relative : undefined;
+    return { basePath, pathConstraint: pathValue };
+  }
+
+  function resolveSearchBase(pathConstraint: string | undefined): {
+    basePath: string;
+    pathConstraint?: string;
+  } {
+    if (!pathConstraint) return { basePath: activeCwd, pathConstraint };
+    if (path.isAbsolute(pathConstraint)) return absolutePathBase(pathConstraint);
+    if (pathConstraint === ".." || pathConstraint.startsWith(`..${path.sep}`)) {
+      return absolutePathBase(path.resolve(activeCwd, pathConstraint));
+    }
+    return { basePath: activeCwd, pathConstraint };
+  }
+
+  function trimFinderCache() {
+    while (finders.size >= MAX_CACHED_FINDERS) {
+      const [oldestBase, oldestFinder] = finders.entries().next().value ?? [];
+      if (!oldestBase || !oldestFinder) return;
+      if (!oldestFinder.isDestroyed) oldestFinder.destroy();
+      finders.delete(oldestBase);
+      if (activeBasePath === oldestBase) activeBasePath = null;
+    }
+  }
+
+  function ensureFinder(basePath: string): Promise<FileFinder> {
+    const existing = finders.get(basePath);
+    if (existing && !existing.isDestroyed) return Promise.resolve(existing);
+    const pending = finderPromises.get(basePath);
+    if (pending) return pending;
+
+    const promise = (async () => {
+      trimFinderCache();
+      const useDatabases = basePath === activeCwd;
       const result = FileFinder.create({
-        basePath: cwd,
-        frecencyDbPath,
-        historyDbPath,
+        basePath,
+        frecencyDbPath: useDatabases ? frecencyDbPath : undefined,
+        historyDbPath: useDatabases ? historyDbPath : undefined,
         aiMode: true,
       });
 
       if (!result.ok)
         throw new Error(`Failed to create FFF file finder: ${result.error}`);
 
-      finder = result.value;
-      finderCwd = cwd;
+      const finder = result.value;
+      finders.set(basePath, finder);
+      activeBasePath = basePath;
       await finder.waitForScan(15000);
       return finder;
     })().finally(() => {
-      finderPromise = null;
+      finderPromises.delete(basePath);
     });
 
-    return finderPromise;
+    finderPromises.set(basePath, promise);
+    return promise;
   }
 
   function destroyFinder() {
-    if (finder && !finder.isDestroyed) {
-      finder.destroy();
-      finder = null;
-      finderCwd = null;
+    for (const finder of finders.values()) {
+      if (!finder.isDestroyed) finder.destroy();
     }
+    finders.clear();
+    activeBasePath = null;
+  }
+
+  function getActiveFinder(): FileFinder | null {
+    if (!activeBasePath) return null;
+    const finder = finders.get(activeBasePath);
+    return finder && !finder.isDestroyed ? finder : null;
   }
 
   async function getMentionItems(
@@ -381,22 +457,20 @@ export default function fffExtension(pi: ExtensionAPI) {
     const result = f.mixedSearch(query, { pageSize: MENTION_MAX_RESULTS });
     if (!result.ok) return [];
 
-    return result.value.items
-      .slice(0, MENTION_MAX_RESULTS)
-      .map((mixed: MixedItem) => {
-        if (mixed.type === "directory") {
-          return {
-            value: buildAtCompletionValue(mixed.item.relativePath),
-            label: mixed.item.dirName,
-            description: mixed.item.relativePath,
-          };
-        }
+    return result.value.items.slice(0, MENTION_MAX_RESULTS).map((mixed: MixedItem) => {
+      if (mixed.type === "directory") {
         return {
           value: buildAtCompletionValue(mixed.item.relativePath),
-          label: mixed.item.fileName,
+          label: mixed.item.dirName,
           description: mixed.item.relativePath,
         };
-      });
+      }
+      return {
+        value: buildAtCompletionValue(mixed.item.relativePath),
+        label: mixed.item.fileName,
+        description: mixed.item.relativePath,
+      };
+    });
   }
 
   // Editor wrapper that injects FFF @-mention autocomplete alongside base provider.
@@ -423,12 +497,8 @@ export default function fffExtension(pi: ExtensionAPI) {
           if (mentionResult) return mentionResult;
           // Fall back to base provider
           return (
-            this.baseProvider?.getSuggestions(
-              lines,
-              cursorLine,
-              cursorCol,
-              options,
-            ) ?? null
+            this.baseProvider?.getSuggestions(lines, cursorLine, cursorCol, options) ??
+            null
           );
         },
         applyCompletion: (lines, cursorLine, cursorCol, item, prefix) => {
@@ -482,14 +552,12 @@ export default function fffExtension(pi: ExtensionAPI) {
   });
 
   pi.registerFlag("fff-frecency-db", {
-    description:
-      "Path to the frecency database (overrides FFF_FRECENCY_DB env)",
+    description: "Path to the frecency database (overrides FFF_FRECENCY_DB env)",
     type: "string",
   });
 
   pi.registerFlag("fff-history-db", {
-    description:
-      "Path to the query history database (overrides FFF_HISTORY_DB env)",
+    description: "Path to the query history database (overrides FFF_HISTORY_DB env)",
     type: "string",
   });
 
@@ -519,20 +587,15 @@ export default function fffExtension(pi: ExtensionAPI) {
     context: any,
     maxLines = 15,
   ) => {
-    const text =
-      (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-    const output =
-      result.content?.find((c) => c.type === "text")?.text?.trim() ?? "";
+    const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+    const output = result.content?.find((c) => c.type === "text")?.text?.trim() ?? "";
     if (!output) {
       text.setText(theme.fg("muted", "No output"));
       return text;
     }
 
     const lines = output.split("\n");
-    const displayLines = lines.slice(
-      0,
-      options.expanded ? lines.length : maxLines,
-    );
+    const displayLines = lines.slice(0, options.expanded ? lines.length : maxLines);
     let content = `\n${displayLines.map((line: string) => theme.fg("toolOutput", line)).join("\n")}`;
     if (lines.length > displayLines.length) {
       content += theme.fg(
@@ -597,15 +660,23 @@ export default function fffExtension(pi: ExtensionAPI) {
     async execute(_toolCallId, params, signal) {
       if (signal?.aborted) throw new Error("Operation aborted");
 
-      const f = await ensureFinder(activeCwd);
+      const invalidPath = params.path ? invalidPathMessage(params.path) : null;
+      if (invalidPath) throw new Error(invalidPath);
+
+      const searchBase = resolveSearchBase(params.path);
+      const f = await ensureFinder(searchBase.basePath);
       const effectiveLimit = Math.max(1, params.limit ?? DEFAULT_GREP_LIMIT);
-      const query = buildQuery(params.path, params.pattern, params.exclude, activeCwd);
+      const query = buildQuery(
+        searchBase.pathConstraint,
+        params.pattern,
+        params.exclude,
+        searchBase.basePath,
+      );
       // Auto-detect: regex if the pattern has regex metacharacters AND parses
       // as a valid regex, otherwise plain literal. The fuzzy fallback below
       // only kicks in for plain mode — regex queries are intentional.
       const hasRegexSyntax =
-        params.pattern !==
-        params.pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        params.pattern !== params.pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       let mode: GrepMode = hasRegexSyntax ? "regex" : "plain";
       if (mode === "regex") {
         try {
@@ -677,14 +748,10 @@ export default function fffExtension(pi: ExtensionAPI) {
       let output = formatGrepOutput(result);
       const notices: string[] = [];
       if (result.regexFallbackError) {
-        notices.push(
-          `Invalid regex: ${result.regexFallbackError}, used literal match`,
-        );
+        notices.push(`Invalid regex: ${result.regexFallbackError}, used literal match`);
       }
       if (result.nextCursor) {
-        notices.push(
-          `Continue with cursor="${storeCursor(result.nextCursor)}"`,
-        );
+        notices.push(`Continue with cursor="${storeCursor(result.nextCursor)}"`);
       }
 
       if (notices.length > 0) output += `\n\n[${notices.join(". ")}]`;
@@ -700,8 +767,7 @@ export default function fffExtension(pi: ExtensionAPI) {
     },
 
     renderCall(args, theme, context) {
-      const text =
-        (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+      const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
       const pattern = args?.pattern ?? "";
       const path = args?.path ?? ".";
       let content =
@@ -768,17 +834,28 @@ export default function fffExtension(pi: ExtensionAPI) {
     async execute(_toolCallId, params, signal) {
       if (signal?.aborted) throw new Error("Operation aborted");
 
-      const f = await ensureFinder(activeCwd);
-
-      // Resume from a prior cursor if supplied — cursor owns query+pageSize so
-      // the agent can't accidentally mix patterns across pages.
+      // Resume from a prior cursor if supplied — cursor owns basePath+query+pageSize
+      // so the agent can't accidentally mix patterns across pages.
       const resumed = params.cursor ? getFindCursor(params.cursor) : undefined;
+      const invalidPath =
+        !params.cursor && params.path ? invalidPathMessage(params.path) : null;
+      if (invalidPath) throw new Error(invalidPath);
+
+      const resolvedBase = resolveSearchBase(params.path);
+      const basePath = resumed?.basePath ?? resolvedBase.basePath;
+      const f = await ensureFinder(basePath);
+
       const effectiveLimit = resumed
         ? resumed.pageSize
         : Math.max(1, params.limit ?? DEFAULT_FIND_LIMIT);
       const query = resumed
         ? resumed.query
-        : buildQuery(params.path, params.pattern, params.exclude, activeCwd);
+        : buildQuery(
+            resolvedBase.pathConstraint,
+            params.pattern,
+            params.exclude,
+            resolvedBase.basePath,
+          );
       const pattern = resumed ? resumed.pattern : params.pattern;
       const pageIndex = resumed?.nextPageIndex ?? 0;
 
@@ -797,8 +874,7 @@ export default function fffExtension(pi: ExtensionAPI) {
       // shown so far there's another page to fetch.
       const shownSoFar = pageIndex * effectiveLimit + result.items.length;
       const hasMore =
-        result.items.length >= effectiveLimit &&
-        result.totalMatched > shownSoFar;
+        result.items.length >= effectiveLimit && result.totalMatched > shownSoFar;
 
       const notices: string[] = [];
       if (formatted.weak && formatted.shownCount > 0)
@@ -809,6 +885,7 @@ export default function fffExtension(pi: ExtensionAPI) {
       if (!formatted.weak && hasMore) {
         const remaining = result.totalMatched - shownSoFar;
         const cursorId = storeFindCursor({
+          basePath,
           query,
           pattern,
           pageSize: effectiveLimit,
@@ -832,8 +909,7 @@ export default function fffExtension(pi: ExtensionAPI) {
     },
 
     renderCall(args, theme, context) {
-      const text =
-        (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+      const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
       const pattern = args?.pattern ?? "";
       const path = args?.path ?? ".";
       let content =
@@ -866,9 +942,7 @@ export default function fffExtension(pi: ExtensionAPI) {
       constraints: Type.Optional(
         Type.String({ description: "File filter, e.g. '*.{ts,tsx} !test/'" }),
       ),
-      context: Type.Optional(
-        Type.Number({ description: "Context lines before+after" }),
-      ),
+      context: Type.Optional(Type.Number({ description: "Context lines before+after" })),
       limit: Type.Optional(
         Type.Number({
           description: `Max matches (default ${DEFAULT_GREP_LIMIT})`,
@@ -934,8 +1008,7 @@ export default function fffExtension(pi: ExtensionAPI) {
       },
 
       renderCall(args, theme, context) {
-        const text =
-          (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+        const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
         const patterns = args?.patterns ?? [];
         const constraints = args?.constraints;
         let content =
@@ -957,8 +1030,7 @@ export default function fffExtension(pi: ExtensionAPI) {
   // --- commands ---
 
   pi.registerCommand("fff-mode", {
-    description:
-      "Show or set FFF mode: /fff-mode [tools-and-ui | tools-only | override]",
+    description: "Show or set FFF mode: /fff-mode [tools-and-ui | tools-only | override]",
     handler: async (args, ctx) => {
       const arg = (args || "").trim();
 
@@ -967,19 +1039,13 @@ export default function fffExtension(pi: ExtensionAPI) {
         const mode = getMode();
         const flag = pi.getFlag("fff-mode") ?? "unset";
         const env = process.env.PI_FFF_MODE ?? "unset";
-        ctx.ui.notify(
-          `Current mode: '${mode}'\nFlag: ${flag}, Env: ${env}`,
-          "info",
-        );
+        ctx.ui.notify(`Current mode: '${mode}'\nFlag: ${flag}, Env: ${env}`, "info");
         return;
       }
 
       // Validate and set mode
       if (!VALID_MODES.includes(arg as FffMode)) {
-        ctx.ui.notify(
-          `Usage: /fff-mode [${VALID_MODES.join(" | ")}]`,
-          "warning",
-        );
+        ctx.ui.notify(`Usage: /fff-mode [${VALID_MODES.join(" | ")}]`, "warning");
         return;
       }
 
@@ -1001,7 +1067,8 @@ export default function fffExtension(pi: ExtensionAPI) {
   pi.registerCommand("fff-health", {
     description: "Show FFF file finder health and status",
     handler: async (_args, ctx) => {
-      if (!finder || finder.isDestroyed) {
+      const finder = getActiveFinder();
+      if (!finder) {
         ctx.ui.notify("FFF not initialized", "warning");
         return;
       }
@@ -1036,7 +1103,8 @@ export default function fffExtension(pi: ExtensionAPI) {
   pi.registerCommand("fff-rescan", {
     description: "Trigger FFF to rescan files",
     handler: async (_args, ctx) => {
-      if (!finder || finder.isDestroyed) {
+      const finder = getActiveFinder();
+      if (!finder) {
         ctx.ui.notify("FFF not initialized", "warning");
         return;
       }

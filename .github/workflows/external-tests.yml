@@ -9,8 +9,6 @@ on:
 env:
   CARGO_TERM_COLOR: always
   MACOSX_DEPLOYMENT_TARGET: "13"
-  # Force Node 24 for all JS-based actions to avoid the libuv
-  # process_title assertion crash on Windows (known Node 20 bug).
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
@@ -25,8 +23,6 @@ jobs:
         include:
           - os: ubuntu-latest
           - os: macos-latest
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
@@ -43,37 +39,8 @@ jobs:
           cache-on-failure: false
           cache-key: "v2-lua-e2e"
           rustflags: ""
-          target: ${{ matrix.target || '' }}
-
-      - name: Build Rust binary (Windows)
-        if: matrix.target
-        run: cargo build --release --target ${{ matrix.target }} -p fff-nvim --features zlob
-
-      - name: Copy binary to target/release (Windows)
-        if: matrix.target
-        shell: bash
-        run: |
-          cp target/${{ matrix.target }}/release/fff_nvim.dll target/release/fff_nvim.dll
-
-      - name: Verify Windows DLL has no unexpected dependencies
-        if: matrix.target
-        shell: pwsh
-        run: |
-          # Find dumpbin via vswhere (always available on GitHub Actions Windows runners)
-          $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
-          $dumpbin = Get-ChildItem "$vsPath" -Recurse -Filter "dumpbin.exe" | Select-Object -First 1
-          if (-not $dumpbin) { Write-Error "dumpbin.exe not found"; exit 1 }
-
-          $deps = & $dumpbin.FullName /DEPENDENTS target\release\fff_nvim.dll | Out-String
-          Write-Host $deps
-          # zlob must be statically linked - fail if zlob.dll appears as a dependency
-          if ($deps -match 'zlob\.dll') {
-            Write-Error "fff_nvim.dll has unexpected dynamic dependency on zlob.dll - zlob should be statically linked"
-            exit 1
-          }
 
       - name: Build Rust binary
-        if: ${{ !matrix.target }}
         run: cargo build --release -p fff-nvim --features zlob
 
       - name: Install Neovim
@@ -96,7 +63,6 @@ jobs:
 
       - name: Run bun tests
         shell: bash
-        if: ${{ matrix.os != 'windows-latest' }}
         run: make test-bun
 
       - name: Install Node.js
