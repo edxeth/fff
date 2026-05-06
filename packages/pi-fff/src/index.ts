@@ -342,10 +342,15 @@ export default function fffExtension(pi: ExtensionAPI) {
     }
   }
 
+  function expandHomePath(pathConstraint: string): string {
+    const home = process.env.HOME ?? process.env.USERPROFILE;
+    if (!home) return pathConstraint;
+    return pathConstraint.replace(/^~($|\/|\\)/, (_, sep) => home + sep);
+  }
+
   function invalidPathMessage(pathConstraint: string, cwd = activeCwd): string | null {
-    const absolute = path.isAbsolute(pathConstraint)
-      ? pathConstraint
-      : path.resolve(cwd, pathConstraint);
+    const expanded = expandHomePath(pathConstraint);
+    const absolute = path.isAbsolute(expanded) ? expanded : path.resolve(cwd, expanded);
     const wildcard = absolute.search(/[*?[{]/);
     const concrete = wildcard === -1 ? absolute : absolute.slice(0, wildcard);
     const concreteDir = concrete.endsWith(path.sep)
@@ -383,9 +388,10 @@ export default function fffExtension(pi: ExtensionAPI) {
     pathConstraint?: string;
   } {
     if (!pathConstraint) return { basePath: activeCwd, pathConstraint };
-    if (path.isAbsolute(pathConstraint)) return absolutePathBase(pathConstraint);
-    if (pathConstraint === ".." || pathConstraint.startsWith(`..${path.sep}`)) {
-      return absolutePathBase(path.resolve(activeCwd, pathConstraint));
+    const expanded = expandHomePath(pathConstraint);
+    if (path.isAbsolute(expanded)) return absolutePathBase(expanded);
+    if (expanded === ".." || expanded.startsWith(`..${path.sep}`)) {
+      return absolutePathBase(path.resolve(activeCwd, expanded));
     }
     return { basePath: activeCwd, pathConstraint };
   }
