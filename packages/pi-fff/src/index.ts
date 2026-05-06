@@ -383,9 +383,13 @@ export default function fffExtension(pi: ExtensionAPI) {
     pathConstraint?: string;
   } {
     if (!pathConstraint) return { basePath: activeCwd, pathConstraint };
-    if (path.isAbsolute(pathConstraint)) return absolutePathBase(pathConstraint);
-    if (pathConstraint === ".." || pathConstraint.startsWith(`..${path.sep}`)) {
-      return absolutePathBase(path.resolve(activeCwd, pathConstraint));
+    // Expand ~ to home directory — Node's path.isAbsolute doesn't handle it
+    const expanded = pathConstraint.replace(/^~($|\/|\\)/, (m, sep) =>
+      (process.env.HOME ?? "") + sep,
+    );
+    if (path.isAbsolute(expanded)) return absolutePathBase(expanded);
+    if (expanded === ".." || expanded.startsWith(`..${path.sep}`)) {
+      return absolutePathBase(path.resolve(activeCwd, expanded));
     }
     return { basePath: activeCwd, pathConstraint };
   }
