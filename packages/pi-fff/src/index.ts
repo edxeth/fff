@@ -296,6 +296,8 @@ export default function fffExtension(pi: ExtensionAPI) {
   // base path at a time — otherwise parallel tool calls would race and
   // deadlock at the native layer (issue #403).
   const finderPromises = new Map<string, Promise<FileFinder>>();
+  const finderLocks = new Map<string, Promise<void>>();
+  const finderActiveOps = new Map<string, number>();
   let activeCwd = process.cwd();
 
   // Mode resolution: flag > env > default
@@ -398,8 +400,12 @@ export default function fffExtension(pi: ExtensionAPI) {
 
   function trimFinderCache() {
     while (finders.size >= MAX_CACHED_FINDERS) {
-      const [oldestBase, oldestFinder] = finders.entries().next().value ?? [];
-      if (!oldestBase || !oldestFinder) return;
+      const evictable = [...finders.entries()].find(
+        ([basePath]) => (finderActiveOps.get(basePath) ?? 0) === 0,
+      );
+      if (!evictable) return;
+
+      const [oldestBase, oldestFinder] = evictable;
       if (!oldestFinder.isDestroyed) oldestFinder.destroy();
       finders.delete(oldestBase);
       if (activeBasePath === oldestBase) activeBasePath = null;
@@ -443,7 +449,34 @@ export default function fffExtension(pi: ExtensionAPI) {
       if (!finder.isDestroyed) finder.destroy();
     }
     finders.clear();
+    finderLocks.clear();
+    finderActiveOps.clear();
     activeBasePath = null;
+  }
+
+  async function withFinderLease<T>(
+    basePath: string,
+    work: (finder: FileFinder) => T | Promise<T>,
+  ): Promise<T> {
+    const previous = finderLocks.get(basePath) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    finderLocks.set(basePath, previous.then(() => current, () => current));
+
+    await previous.catch(() => undefined);
+    finderActiveOps.set(basePath, (finderActiveOps.get(basePath) ?? 0) + 1);
+    try {
+      const finder = await ensureFinder(basePath);
+      return await work(finder);
+    } finally {
+      const remaining = (finderActiveOps.get(basePath) ?? 1) - 1;
+      if (remaining > 0) finderActiveOps.set(basePath, remaining);
+      else finderActiveOps.delete(basePath);
+      release();
+      if (finderLocks.get(basePath) === current) finderLocks.delete(basePath);
+    }
   }
 
   function getActiveFinder(): FileFinder | null {
@@ -457,10 +490,11 @@ export default function fffExtension(pi: ExtensionAPI) {
     signal: AbortSignal,
   ): Promise<AutocompleteItem[]> {
     if (signal.aborted) return [];
-    const f = await ensureFinder(activeCwd);
-    if (signal.aborted) return [];
-
-    const result = f.mixedSearch(query, { pageSize: MENTION_MAX_RESULTS });
+    const result = await withFinderLease(activeCwd, (finder) => {
+      if (signal.aborted) return null;
+      return finder.mixedSearch(query, { pageSize: MENTION_MAX_RESULTS });
+    });
+    if (!result) return [];
     if (!result.ok) return [];
 
     return result.value.items.slice(0, MENTION_MAX_RESULTS).map((mixed: MixedItem) => {
@@ -570,7 +604,7 @@ export default function fffExtension(pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     try {
       activeCwd = ctx.cwd;
-      await ensureFinder(activeCwd);
+      await withFinderLease(activeCwd, () => undefined);
       applyEditorMode(ctx);
     } catch (e: unknown) {
       ctx.ui.notify(
@@ -670,7 +704,6 @@ export default function fffExtension(pi: ExtensionAPI) {
       if (invalidPath) throw new Error(invalidPath);
 
       const searchBase = resolveSearchBase(params.path);
-      const f = await ensureFinder(searchBase.basePath);
       const effectiveLimit = Math.max(1, params.limit ?? DEFAULT_GREP_LIMIT);
       const query = buildQuery(
         searchBase.pathConstraint,
@@ -718,15 +751,17 @@ export default function fffExtension(pi: ExtensionAPI) {
       // (case-insensitive when pattern is all lowercase).
       const smartCase = params.caseSensitive !== true;
 
-      const grepResult = f.grep(query, {
-        mode,
-        smartCase,
-        maxMatchesPerFile: Math.min(effectiveLimit, 50),
-        cursor: (params.cursor ? getCursor(params.cursor) : null) ?? null,
-        beforeContext: params.context ?? 0,
-        afterContext: params.context ?? 0,
-        classifyDefinitions: true,
-      });
+      const grepResult = await withFinderLease(searchBase.basePath, (finder) =>
+        finder.grep(query, {
+          mode,
+          smartCase,
+          maxMatchesPerFile: Math.min(effectiveLimit, 50),
+          cursor: (params.cursor ? getCursor(params.cursor) : null) ?? null,
+          beforeContext: params.context ?? 0,
+          afterContext: params.context ?? 0,
+          classifyDefinitions: true,
+        }),
+      );
 
       if (!grepResult.ok) throw new Error(grepResult.error);
 
@@ -735,15 +770,17 @@ export default function fffExtension(pi: ExtensionAPI) {
 
       // automatic fuzzy fallback allows to broad the queries and find different cases
       if (result.items.length === 0 && !params.cursor && mode !== "regex") {
-        const fuzzy = f.grep(params.pattern, {
-          mode: "fuzzy",
-          smartCase,
-          maxMatchesPerFile: Math.min(effectiveLimit, 50),
-          cursor: null,
-          beforeContext: 0,
-          afterContext: 0,
-          classifyDefinitions: true,
-        });
+        const fuzzy = await withFinderLease(searchBase.basePath, (finder) =>
+          finder.grep(params.pattern, {
+            mode: "fuzzy",
+            smartCase,
+            maxMatchesPerFile: Math.min(effectiveLimit, 50),
+            cursor: null,
+            beforeContext: 0,
+            afterContext: 0,
+            classifyDefinitions: true,
+          }),
+        );
 
         if (fuzzy.ok && fuzzy.value.items.length > 0) {
           fuzzyNotice = `0 exact matches. Maybe you meant this?`;
@@ -849,8 +886,6 @@ export default function fffExtension(pi: ExtensionAPI) {
 
       const resolvedBase = resolveSearchBase(params.path);
       const basePath = resumed?.basePath ?? resolvedBase.basePath;
-      const f = await ensureFinder(basePath);
-
       const effectiveLimit = resumed
         ? resumed.pageSize
         : Math.max(1, params.limit ?? DEFAULT_FIND_LIMIT);
@@ -865,10 +900,12 @@ export default function fffExtension(pi: ExtensionAPI) {
       const pattern = resumed ? resumed.pattern : params.pattern;
       const pageIndex = resumed?.nextPageIndex ?? 0;
 
-      const searchResult = f.fileSearch(query, {
-        pageIndex,
-        pageSize: effectiveLimit,
-      });
+      const searchResult = await withFinderLease(basePath, (finder) =>
+        finder.fileSearch(query, {
+          pageIndex,
+          pageSize: effectiveLimit,
+        }),
+      );
       if (!searchResult.ok) throw new Error(searchResult.error);
 
       const result = searchResult.value;
@@ -975,18 +1012,19 @@ export default function fffExtension(pi: ExtensionAPI) {
         if (!params.patterns?.length)
           throw new Error("patterns array must have at least 1 element");
 
-        const f = await ensureFinder(activeCwd);
         const effectiveLimit = Math.max(1, params.limit ?? DEFAULT_GREP_LIMIT);
 
-        const grepResult = f.multiGrep({
-          patterns: params.patterns,
-          constraints: params.constraints,
-          maxMatchesPerFile: Math.min(effectiveLimit, 50),
-          smartCase: true,
-          cursor: (params.cursor ? getCursor(params.cursor) : null) ?? null,
-          beforeContext: params.context ?? 0,
-          afterContext: params.context ?? 0,
-        });
+        const grepResult = await withFinderLease(activeCwd, (finder) =>
+          finder.multiGrep({
+            patterns: params.patterns,
+            constraints: params.constraints,
+            maxMatchesPerFile: Math.min(effectiveLimit, 50),
+            smartCase: true,
+            cursor: (params.cursor ? getCursor(params.cursor) : null) ?? null,
+            beforeContext: params.context ?? 0,
+            afterContext: params.context ?? 0,
+          }),
+        );
 
         if (!grepResult.ok) throw new Error(grepResult.error);
 
