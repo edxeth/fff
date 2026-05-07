@@ -221,6 +221,14 @@ function pathHasLiteralSegment(relativePath: string, pattern: string): boolean {
     .some((segment) => segment === literal || segment.startsWith(`${literal}.`));
 }
 
+function patternLooksLikePath(pattern: string): boolean {
+  return /[\\/]|[*?[{]/.test(pattern);
+}
+
+function pathLikePatternMessage(_pattern: string): string {
+  return "Path/glob belongs in path, not pattern";
+}
+
 function formatFindOutput(
   result: SearchResult,
   limit: number,
@@ -376,15 +384,23 @@ export default function fffExtension(pi: ExtensionAPI) {
     return pathConstraint.replace(/^~($|\/|\\)/, (_, sep) => home + sep);
   }
 
-  function invalidPathMessage(pathConstraint: string, cwd = activeCwd): string | null {
+  function concreteStatPath(pathConstraint: string, cwd = activeCwd): string {
     const expanded = expandHomePath(pathConstraint);
     const absolute = path.isAbsolute(expanded) ? expanded : path.resolve(cwd, expanded);
     const wildcard = absolute.search(/[*?[{]/);
     const concrete = wildcard === -1 ? absolute : absolute.slice(0, wildcard);
-    const concreteDir = concrete.endsWith(path.sep)
-      ? concrete.slice(0, -1)
-      : path.dirname(concrete);
-    const statPath = wildcard === -1 ? absolute : concreteDir;
+    if (wildcard === -1) return absolute;
+    return concrete.endsWith(path.sep) ? concrete.slice(0, -1) : path.dirname(concrete);
+  }
+
+  function hasHiddenSegment(pathConstraint: string): boolean {
+    return pathConstraint
+      .split(/[\\/]+/)
+      .some((segment) => segment.startsWith(".") && segment !== "." && segment !== "..");
+  }
+
+  function invalidPathMessage(pathConstraint: string, cwd = activeCwd): string | null {
+    const statPath = concreteStatPath(pathConstraint, cwd);
     return fs.existsSync(statPath)
       ? null
       : `Path not found: ${statPath || pathConstraint}`;
@@ -419,6 +435,9 @@ export default function fffExtension(pi: ExtensionAPI) {
     const expanded = expandHomePath(pathConstraint);
     if (path.isAbsolute(expanded)) return absolutePathBase(expanded);
     if (expanded === ".." || expanded.startsWith(`..${path.sep}`)) {
+      return absolutePathBase(path.resolve(activeCwd, expanded));
+    }
+    if (hasHiddenSegment(expanded) && fs.existsSync(concreteStatPath(expanded))) {
       return absolutePathBase(path.resolve(activeCwd, expanded));
     }
     return { basePath: activeCwd, pathConstraint };
@@ -924,6 +943,9 @@ export default function fffExtension(pi: ExtensionAPI) {
             resolvedBase.basePath,
           );
       const pattern = resumed ? resumed.pattern : params.pattern;
+      if (!resumed && patternLooksLikePath(pattern)) {
+        throw new Error(pathLikePatternMessage(pattern));
+      }
       const pageIndex = resumed?.nextPageIndex ?? 0;
 
       const searchResult = await withFinderLease(basePath, (finder) =>
