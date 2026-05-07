@@ -203,6 +203,22 @@ interface FormattedFind {
   output: string;
   weak: boolean;
   shownCount: number;
+  literalTailSuppressed: boolean;
+}
+
+function normalizeLiteralPattern(pattern: string): string | null {
+  const trimmed = pattern.trim().toLowerCase();
+  return /^[a-z0-9._-]+$/.test(trimmed) ? trimmed : null;
+}
+
+function pathHasLiteralSegment(relativePath: string, pattern: string): boolean {
+  const literal = normalizeLiteralPattern(pattern);
+  if (!literal) return false;
+
+  return relativePath
+    .toLowerCase()
+    .split("/")
+    .some((segment) => segment === literal || segment.startsWith(`${literal}.`));
 }
 
 function formatFindOutput(
@@ -215,6 +231,7 @@ function formatFindOutput(
       output: "No files found matching pattern",
       weak: false,
       shownCount: 0,
+      literalTailSuppressed: false,
     };
   }
 
@@ -225,8 +242,16 @@ function formatFindOutput(
   // fuzzy noise (query length-scaled threshold from score.rs).
   const topScore = result.scores[0]?.total ?? 0;
   const weak = topScore < weakScoreThreshold(pattern);
+  const literalFiltered =
+    !weak &&
+    pathHasLiteralSegment(result.items[0]?.relativePath ?? "", pattern) &&
+    result.totalMatched > FIND_WEAK_SAMPLE_SIZE;
   const effective = weak ? Math.min(FIND_WEAK_SAMPLE_SIZE, limit) : limit;
-  const shown = reordered.slice(0, effective);
+  const shown = literalFiltered
+    ? reordered
+        .filter((p) => pathHasLiteralSegment(p.item.relativePath, pattern))
+        .slice(0, effective)
+    : reordered.slice(0, effective);
 
   return {
     output: shown
@@ -234,6 +259,7 @@ function formatFindOutput(
       .join("\n"),
     weak,
     shownCount: shown.length,
+    literalTailSuppressed: literalFiltered && shown.length < result.totalMatched,
   };
 }
 
@@ -924,8 +950,13 @@ export default function fffExtension(pi: ExtensionAPI) {
         notices.push(
           `Query "${pattern}" produced only weak scattered fuzzy matches. Output capped at ${formatted.shownCount}/${result.totalMatched}.`,
         );
+      const hiddenFuzzyMatches = result.totalMatched - formatted.shownCount;
+      if (formatted.literalTailSuppressed && hiddenFuzzyMatches >= 1000)
+        notices.push(
+          `${formatted.shownCount} exact matches shown. Fuzzy tail hidden`,
+        );
 
-      if (!formatted.weak && hasMore) {
+      if (!formatted.weak && !formatted.literalTailSuppressed && hasMore) {
         const remaining = result.totalMatched - shownSoFar;
         const cursorId = storeFindCursor({
           basePath,
@@ -935,7 +966,7 @@ export default function fffExtension(pi: ExtensionAPI) {
           nextPageIndex: pageIndex + 1,
         });
         notices.push(
-          `${remaining} more match${remaining === 1 ? "" : "es"} available. cursor="${cursorId}" to continue`,
+          `${remaining} more. Next page: find cursor="${cursorId}"`,
         );
       }
 
