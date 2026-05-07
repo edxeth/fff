@@ -221,6 +221,24 @@ function pathHasLiteralSegment(relativePath: string, pattern: string): boolean {
     .some((segment) => segment === literal || segment.startsWith(`${literal}.`));
 }
 
+function patternLooksLikePath(pattern: string): boolean {
+  return /[\\/]|[*?[{]/.test(pattern);
+}
+
+function pathLikePatternMessage(_pattern: string): string {
+  return "Path/glob belongs in path, not pattern";
+}
+
+function pathLooksLikeMultiplePaths(pathConstraint: string): boolean {
+  const parts = pathConstraint.trim().split(/\s+/).filter(Boolean);
+  if (parts.length < 2) return false;
+  return parts.every((part) => part.includes("/") || part.includes("\\"));
+}
+
+function multiplePathsMessage(): string {
+  return "Multiple paths are not supported in path; use one file, directory, or glob";
+}
+
 function formatFindOutput(
   result: SearchResult,
   limit: number,
@@ -376,15 +394,23 @@ export default function fffExtension(pi: ExtensionAPI) {
     return pathConstraint.replace(/^~($|\/|\\)/, (_, sep) => home + sep);
   }
 
-  function invalidPathMessage(pathConstraint: string, cwd = activeCwd): string | null {
+  function concreteStatPath(pathConstraint: string, cwd = activeCwd): string {
     const expanded = expandHomePath(pathConstraint);
     const absolute = path.isAbsolute(expanded) ? expanded : path.resolve(cwd, expanded);
     const wildcard = absolute.search(/[*?[{]/);
     const concrete = wildcard === -1 ? absolute : absolute.slice(0, wildcard);
-    const concreteDir = concrete.endsWith(path.sep)
-      ? concrete.slice(0, -1)
-      : path.dirname(concrete);
-    const statPath = wildcard === -1 ? absolute : concreteDir;
+    if (wildcard === -1) return absolute;
+    return concrete.endsWith(path.sep) ? concrete.slice(0, -1) : path.dirname(concrete);
+  }
+
+  function hasHiddenSegment(pathConstraint: string): boolean {
+    return pathConstraint
+      .split(/[\\/]+/)
+      .some((segment) => segment.startsWith(".") && segment !== "." && segment !== "..");
+  }
+
+  function invalidPathMessage(pathConstraint: string, cwd = activeCwd): string | null {
+    const statPath = concreteStatPath(pathConstraint, cwd);
     return fs.existsSync(statPath)
       ? null
       : `Path not found: ${statPath || pathConstraint}`;
@@ -419,6 +445,9 @@ export default function fffExtension(pi: ExtensionAPI) {
     const expanded = expandHomePath(pathConstraint);
     if (path.isAbsolute(expanded)) return absolutePathBase(expanded);
     if (expanded === ".." || expanded.startsWith(`..${path.sep}`)) {
+      return absolutePathBase(path.resolve(activeCwd, expanded));
+    }
+    if (hasHiddenSegment(expanded) && fs.existsSync(concreteStatPath(expanded))) {
       return absolutePathBase(path.resolve(activeCwd, expanded));
     }
     return { basePath: activeCwd, pathConstraint };
@@ -682,7 +711,7 @@ export default function fffExtension(pi: ExtensionAPI) {
     path: Type.Optional(
       Type.String({
         description:
-          "Repo-relative path constraint. Directory prefix (src/ or src/foo/), bare filename with extension (main.rs), or glob (*.ts, src/**/*.cc, {src,lib}/**). Applied to the full repo-relative path.",
+          "Single path constraint: one file, one directory, or one glob. Do not pass multiple paths. Applied to the full repo-relative path.",
       }),
     ),
     exclude: Type.Optional(
@@ -726,6 +755,9 @@ export default function fffExtension(pi: ExtensionAPI) {
     async execute(_toolCallId, params, signal) {
       if (signal?.aborted) throw new Error("Operation aborted");
 
+      if (params.path && pathLooksLikeMultiplePaths(params.path)) {
+        throw new Error(multiplePathsMessage());
+      }
       const invalidPath = params.path ? invalidPathMessage(params.path) : null;
       if (invalidPath) throw new Error(invalidPath);
 
@@ -866,7 +898,7 @@ export default function fffExtension(pi: ExtensionAPI) {
     path: Type.Optional(
       Type.String({
         description:
-          "Repo-relative path constraint. Directory prefix (src/ or src/foo/), bare filename with extension (main.rs), or glob (*.ts, src/**/*.cc, {src,lib}/**). Applied to the full repo-relative path.",
+          "Single path constraint: one file, one directory, or one glob. Do not pass multiple paths. Applied to the full repo-relative path.",
       }),
     ),
     exclude: Type.Optional(
@@ -893,6 +925,7 @@ export default function fffExtension(pi: ExtensionAPI) {
     promptGuidelines: [
       "Matches the WHOLE path, not just the filename — `profile` hits `chrome/browser/profiles/x.cc` too.",
       "Keep queries to 1-2 terms; extra words narrow.",
+      "Use one path constraint only: one file, directory, or glob.",
       "Use for paths, not content. Use grep for content.",
       "For exact path matches use a glob in `path` — e.g. path: '**/profile.h' for exact filename, or path: 'src/**/profile.h' scoped to a subtree. Bare patterns are fuzzy.",
       "To list everything inside a directory, pass path: 'dir/**' with an empty or wildcard pattern instead of using pattern alone.",
@@ -906,6 +939,9 @@ export default function fffExtension(pi: ExtensionAPI) {
       // Resume from a prior cursor if supplied — cursor owns basePath+query+pageSize
       // so the agent can't accidentally mix patterns across pages.
       const resumed = params.cursor ? getFindCursor(params.cursor) : undefined;
+      if (!params.cursor && params.path && pathLooksLikeMultiplePaths(params.path)) {
+        throw new Error(multiplePathsMessage());
+      }
       const invalidPath =
         !params.cursor && params.path ? invalidPathMessage(params.path) : null;
       if (invalidPath) throw new Error(invalidPath);
@@ -924,6 +960,9 @@ export default function fffExtension(pi: ExtensionAPI) {
             resolvedBase.basePath,
           );
       const pattern = resumed ? resumed.pattern : params.pattern;
+      if (!resumed && patternLooksLikePath(pattern)) {
+        throw new Error(pathLikePatternMessage(pattern));
+      }
       const pageIndex = resumed?.nextPageIndex ?? 0;
 
       const searchResult = await withFinderLease(basePath, (finder) =>
