@@ -765,9 +765,7 @@ fn should_include_file(path: &Path, repo: &Option<Repository>) -> bool {
     match repo.as_ref() {
         Some(repo) => repo.is_path_ignored(path) != Ok(true),
         None => {
-            // No git repo — apply basic sanity filters.
-            // Hidden directories are skipped by the watcher setup (hidden(true)),
-            // but events can still arrive for files in known non-code directories.
+            // No git repo — apply the same non-code filters used by scan overrides.
             !is_non_code_directory(path)
         }
     }

@@ -447,6 +447,9 @@ export default function fffExtension(pi: ExtensionAPI) {
     if (expanded === ".." || expanded.startsWith(`..${path.sep}`)) {
       return absolutePathBase(path.resolve(activeCwd, expanded));
     }
+    if (/\s/.test(expanded) && fs.existsSync(concreteStatPath(expanded))) {
+      return absolutePathBase(path.resolve(activeCwd, expanded));
+    }
     if (hasHiddenSegment(expanded) && fs.existsSync(concreteStatPath(expanded))) {
       return absolutePathBase(path.resolve(activeCwd, expanded));
     }
@@ -518,7 +521,13 @@ export default function fffExtension(pi: ExtensionAPI) {
     const current = new Promise<void>((resolve) => {
       release = resolve;
     });
-    finderLocks.set(basePath, previous.then(() => current, () => current));
+    finderLocks.set(
+      basePath,
+      previous.then(
+        () => current,
+        () => current,
+      ),
+    );
 
     await previous.catch(() => undefined);
     finderActiveOps.set(basePath, (finderActiveOps.get(basePath) ?? 0) + 1);
@@ -827,10 +836,15 @@ export default function fffExtension(pi: ExtensionAPI) {
       let result = grepResult.value;
       let fuzzyNotice: string | null = null;
 
-      // automatic fuzzy fallback allows to broad the queries and find different cases
-      if (result.items.length === 0 && !params.cursor && mode !== "regex") {
+      // Fuzzy fallback helps broad plain greps, but excludes mean exact filtering.
+      if (
+        result.items.length === 0 &&
+        !params.cursor &&
+        !params.exclude &&
+        mode !== "regex"
+      ) {
         const fuzzy = await withFinderLease(searchBase.basePath, (finder) =>
-          finder.grep(params.pattern, {
+          finder.grep(query, {
             mode: "fuzzy",
             smartCase,
             maxMatchesPerFile: Math.min(effectiveLimit, 50),
@@ -976,7 +990,36 @@ export default function fffExtension(pi: ExtensionAPI) {
       );
       if (!searchResult.ok) throw new Error(searchResult.error);
 
-      const result = searchResult.value;
+      let result = searchResult.value;
+      if (result.items.length === 0 && /\s/.test(pattern.trim())) {
+        const scopedQuery = buildQuery(
+          resolvedBase.pathConstraint,
+          "",
+          params.exclude,
+          basePath,
+        );
+        const fallback = await withFinderLease(basePath, (finder) =>
+          finder.fileSearch(scopedQuery, {
+            pageIndex: 0,
+            pageSize: Math.max(effectiveLimit, 500),
+          }),
+        );
+        if (fallback.ok) {
+          const needle = pattern.trim().toLowerCase();
+          const pairs = fallback.value.items
+            .map((item, index) => ({ item, score: fallback.value.scores[index] }))
+            .filter(({ item }) => item.relativePath.toLowerCase().includes(needle))
+            .slice(0, effectiveLimit);
+          if (pairs.length > 0) {
+            result = {
+              ...fallback.value,
+              items: pairs.map((pair) => pair.item),
+              scores: pairs.map((pair) => pair.score),
+              totalMatched: pairs.length,
+            };
+          }
+        }
+      }
       if (result.items.length === 0) throw new Error("No files found matching pattern");
 
       const formatted = formatFindOutput(result, effectiveLimit, pattern);
@@ -996,9 +1039,7 @@ export default function fffExtension(pi: ExtensionAPI) {
         );
       const hiddenFuzzyMatches = result.totalMatched - formatted.shownCount;
       if (formatted.literalTailSuppressed && hiddenFuzzyMatches >= 1000)
-        notices.push(
-          `${formatted.shownCount} exact matches shown. Fuzzy tail hidden`,
-        );
+        notices.push(`${formatted.shownCount} exact matches shown. Fuzzy tail hidden`);
 
       if (!formatted.weak && !formatted.literalTailSuppressed && hasMore) {
         const remaining = result.totalMatched - shownSoFar;
@@ -1009,9 +1050,7 @@ export default function fffExtension(pi: ExtensionAPI) {
           pageSize: effectiveLimit,
           nextPageIndex: pageIndex + 1,
         });
-        notices.push(
-          `${remaining} more. Next page: find cursor="${cursorId}"`,
-        );
+        notices.push(`${remaining} more. Next page: find cursor="${cursorId}"`);
       }
 
       if (notices.length > 0) output += `\n\n[${notices.join(". ")}]`;
