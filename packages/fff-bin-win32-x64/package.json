@@ -1,5 +1,5 @@
 {
-  "name": "@ff-labs/fff-bin-win32-x64",
+  "name": "@edxeth/fff-bin-win32-x64",
   "version": "0.0.0",
   "description": "fff native binary for Windows x64",
   "os": ["win32"],
@@ -12,7 +12,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/dmtrKovalenko/fff.nvim.git",
+    "url": "git+https://github.com/edxeth/fff.git",
     "directory": "packages/fff-bin-win32-x64"
   }
 }

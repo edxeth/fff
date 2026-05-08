@@ -1,5 +1,5 @@
 {
-  "name": "@ff-labs/fff-bin-darwin-arm64",
+  "name": "@edxeth/fff-bin-darwin-arm64",
   "version": "0.0.0",
   "description": "fff native binary for macOS ARM64 (Apple Silicon)",
   "os": ["darwin"],
@@ -12,7 +12,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/dmtrKovalenko/fff.nvim.git",
+    "url": "git+https://github.com/edxeth/fff.git",
     "directory": "packages/fff-bin-darwin-arm64"
   }
 }

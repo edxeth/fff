@@ -1,18 +1,18 @@
 {
-  "name": "@ff-labs/pi-fff",
+  "name": "@edxeth/pi-fff",
   "public": true,
-  "version": "0.6.0",
+  "version": "0.7.2-edxeth.0",
   "description": "pi extension: FFF-powered fuzzy file and content search",
   "type": "module",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/dmtrKovalenko/fff.nvim.git",
+    "url": "git+https://github.com/edxeth/fff.git",
     "directory": "packages/pi-fff"
   },
-  "homepage": "https://github.com/dmtrKovalenko/fff.nvim/tree/main/packages/pi-fff",
+  "homepage": "https://github.com/edxeth/fff/tree/main/packages/pi-fff",
   "bugs": {
-    "url": "https://github.com/dmtrKovalenko/fff.nvim/issues"
+    "url": "https://github.com/edxeth/fff/issues"
   },
   "keywords": [
     "pi",
@@ -40,7 +40,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@ff-labs/fff-node": "*"
+    "@edxeth/fff-node": "0.7.2-edxeth.0"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

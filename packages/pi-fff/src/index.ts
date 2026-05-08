@@ -22,8 +22,8 @@ import type {
   GrepResult,
   MixedItem,
   SearchResult,
-} from "@ff-labs/fff-node";
-import { FileFinder } from "@ff-labs/fff-node";
+} from "@edxeth/fff-node";
+import { FileFinder } from "@edxeth/fff-node";
 import { buildQuery } from "./query";
 
 // ---------------------------------------------------------------------------

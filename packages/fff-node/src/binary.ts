@@ -2,7 +2,7 @@
  * Binary resolution utilities for fff-node
  *
  * Resolves the native library from:
- * 1. Platform-specific npm package (e.g. @ff-labs/fff-bin-darwin-arm64)
+ * 1. Platform-specific npm package (e.g. @edxeth/fff-bin-darwin-arm64)
  * 2. Local dev build (target/release or target/debug)
  */
 
@@ -37,7 +37,7 @@ function getPackageDir(): string {
     if (existsSync(join(dir, "package.json"))) {
       try {
         const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf-8"));
-        if (pkg.name === "@ff-labs/fff-node") {
+        if (pkg.name === "@edxeth/fff-node") {
           return dir;
         }
       } catch {
@@ -60,8 +60,8 @@ export function binaryExists(): boolean {
 /**
  * Try to resolve the binary from the platform-specific npm package.
  *
- * When users install @ff-labs/fff-node, npm automatically installs the matching
- * optionalDependency (e.g. @ff-labs/fff-bin-darwin-arm64). We resolve the binary
+ * When users install @edxeth/fff-node, npm automatically installs the matching
+ * optionalDependency (e.g. @edxeth/fff-bin-darwin-arm64). We resolve the binary
  * path by requiring that package's package.json and looking for the binary
  * in the same directory.
  */
