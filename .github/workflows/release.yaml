@@ -2,7 +2,7 @@ name: Prebuild
 
 on:
   push:
-    branches: [main, fix/download-version]
+    branches: [main]
     tags:
       - "v*"
   pull_request:
@@ -310,8 +310,8 @@ jobs:
     name: Release
     needs: [build-nvim, build-c, build-mcp]
     runs-on: ubuntu-latest
-    # do not create releases on the forks (no permissions)
-    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dmtrKovalenko'
+    # create releases on push to main or tag
+    if: github.event_name != 'pull_request'
     permissions:
       contents: write
     steps:
@@ -419,8 +419,8 @@ jobs:
     needs: [build-nvim, build-c, build-mcp]
     runs-on: ubuntu-latest
     if: >-
-      github.repository == 'dmtrKovalenko/fff'
-      && ((github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fix/download-version' || startsWith(github.ref, 'refs/tags/v')))
+      github.repository == 'edxeth/fff'
+      && ((github.event_name == 'push' && (github.ref == 'refs/heads/main' || || startsWith(github.ref, 'refs/tags/v')))
       || (github.event_name == 'pull_request' && github.head_ref == 'main'))
 
     steps:
@@ -449,8 +449,8 @@ jobs:
     needs: [build-c]
     runs-on: ubuntu-latest
     if: >-
-      github.repository == 'dmtrKovalenko/fff'
-      && ((github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fix/download-version' || startsWith(github.ref, 'refs/tags/v')))
+      github.repository == 'edxeth/fff'
+      && ((github.event_name == 'push' && (github.ref == 'refs/heads/main' || || startsWith(github.ref, 'refs/tags/v')))
       || (github.event_name == 'pull_request' && github.head_ref == 'main'))
     permissions:
       contents: read
