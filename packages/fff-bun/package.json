@@ -39,7 +39,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/dmtrKovalenko/fff.nvim.git",
+    "url": "git+https://github.com/edxeth/fff.git",
     "directory": "packages/fff"
   },
   "keywords": [
@@ -58,9 +58,9 @@
     "access": "public"
   },
   "bugs": {
-    "url": "https://github.com/dmtrKovalenko/fff.nvim/issues"
+    "url": "https://github.com/edxeth/fff/issues"
   },
-  "homepage": "https://github.com/dmtrKovalenko/fff.nvim#readme",
+  "homepage": "https://github.com/edxeth/fff#readme",
   "optionalDependencies": {
     "@ff-labs/fff-bin-darwin-arm64": "0.0.0",
     "@ff-labs/fff-bin-darwin-x64": "0.0.0",

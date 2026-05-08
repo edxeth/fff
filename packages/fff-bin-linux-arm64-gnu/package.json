@@ -1,5 +1,5 @@
 {
-  "name": "@ff-labs/fff-bin-linux-arm64-gnu",
+  "name": "@edxeth/fff-bin-linux-arm64-gnu",
   "version": "0.0.0",
   "description": "fff native binary for Linux ARM64 (glibc)",
   "os": ["linux"],
@@ -12,7 +12,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/dmtrKovalenko/fff.nvim.git",
+    "url": "git+https://github.com/edxeth/fff.git",
     "directory": "packages/fff-bin-linux-arm64-gnu"
   },
   "libc": ["glibc"]

@@ -14,8 +14,8 @@ import type {
   GrepResult,
   MixedItem,
   SearchResult,
-} from "@ff-labs/fff-node";
-import { FileFinder } from "@ff-labs/fff-node";
+} from "@edxeth/fff-node";
+import { FileFinder } from "@edxeth/fff-node";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { CustomEditor } from "@mariozechner/pi-coding-agent";
 import {
