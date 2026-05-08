@@ -1724,12 +1724,13 @@ impl FileSync {
 
         // Walk files (the fast part, typically 2-3s even on huge repos).
         let is_git_repo = git_workdir.is_some();
+        let include_hidden = is_git_repo || mode.is_ai();
         let bg_threads = BACKGROUND_THREAD_POOL.current_num_threads();
 
         let mut walk_builder = WalkBuilder::new(base_path);
         walk_builder
-            // this is a very important guard for the user opening ~/ or other root non-git dir
-            .hidden(!is_git_repo)
+            // AI mode follows Pi built-ins: hidden paths stay searchable.
+            .hidden(!include_hidden)
             .git_ignore(true)
             .git_exclude(true)
             .git_global(true)
@@ -2157,6 +2158,68 @@ pub(crate) fn hint_allocator_collect() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn has_relative_path(picker: &FilePicker, expected: &str) -> bool {
+        picker
+            .get_files()
+            .iter()
+            .any(|file| file.relative_path(picker) == expected)
+    }
+
+    #[test]
+    fn ai_mode_indexes_hidden_dirs_in_non_git_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        let hidden_file = base.join(".pi").join("agents").join("greeter.md");
+        std::fs::create_dir_all(hidden_file.parent().unwrap()).unwrap();
+        std::fs::write(&hidden_file, b"hello").unwrap();
+
+        let mut picker = FilePicker::new(FilePickerOptions {
+            base_path: base.to_str().unwrap().into(),
+            mode: FFFMode::Ai,
+            watch: false,
+            ..Default::default()
+        })
+        .unwrap();
+        picker.collect_files().unwrap();
+
+        let expected = format!(
+            ".pi{}agents{}greeter.md",
+            std::path::MAIN_SEPARATOR,
+            std::path::MAIN_SEPARATOR
+        );
+        assert!(
+            has_relative_path(&picker, &expected),
+            "AI mode should index hidden files under non-git roots"
+        );
+    }
+
+    #[test]
+    fn default_mode_skips_hidden_dirs_in_non_git_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        let hidden_file = base.join(".pi").join("agents").join("greeter.md");
+        std::fs::create_dir_all(hidden_file.parent().unwrap()).unwrap();
+        std::fs::write(&hidden_file, b"hello").unwrap();
+
+        let mut picker = FilePicker::new(FilePickerOptions {
+            base_path: base.to_str().unwrap().into(),
+            watch: false,
+            ..Default::default()
+        })
+        .unwrap();
+        picker.collect_files().unwrap();
+
+        let expected = format!(
+            ".pi{}agents{}greeter.md",
+            std::path::MAIN_SEPARATOR,
+            std::path::MAIN_SEPARATOR
+        );
+        assert!(
+            !has_relative_path(&picker, &expected),
+            "default non-git scans should keep the historical hidden-dir guard"
+        );
+    }
 
     /// The watcher must watch every ancestor directory up to `base_path`,
     /// not just the immediate parents of indexed files. Intermediate dirs
