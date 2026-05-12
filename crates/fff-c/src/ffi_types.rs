@@ -4,8 +4,10 @@
 //! language with C FFI support. No JSON serialization is used for search or grep
 //! results — callers read struct fields directly.
 
+use std::collections::HashMap;
 use std::ffi::{CString, c_char, c_void};
 use std::ptr;
+use std::sync::{LazyLock, Mutex};
 
 use fff::file_picker::FilePicker;
 use fff::git::format_git_status;
@@ -13,6 +15,24 @@ use fff::{
     DirItem, DirSearchResult, FileItem, GrepMatch, GrepResult, Location, MixedItemRef,
     MixedSearchResult, Score, SearchResult,
 };
+
+/// Side table mapping `FffGrepResult` pointers to per-match per-span pattern indices.
+/// Populated only for multi-pattern (Aho-Corasick) grep results.
+/// Key: pointer as usize. Value: for each match, the pattern index per span.
+pub(crate) static PATTERN_INDICES: LazyLock<Mutex<HashMap<usize, Vec<Vec<u32>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub(crate) fn store_pattern_indices(ptr: *mut FffGrepResult, indices: Vec<Vec<u32>>) {
+    if let Ok(mut map) = PATTERN_INDICES.lock() {
+        map.insert(ptr as usize, indices);
+    }
+}
+
+pub(crate) fn remove_pattern_indices(ptr: *mut FffGrepResult) {
+    if let Ok(mut map) = PATTERN_INDICES.lock() {
+        map.remove(&(ptr as usize));
+    }
+}
 
 /// Allocate a heap CString from a `&str`, returning a raw pointer.
 fn cstring_new(s: &str) -> *mut c_char {

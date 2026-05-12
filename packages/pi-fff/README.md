@@ -136,6 +136,7 @@ Mode precedence:
 - `--fff-mode <mode>` — set mode (see above)
 - `--fff-frecency-db <path>` — path to frecency database (also: `FFF_FRECENCY_DB` env)
 - `--fff-history-db <path>` — path to query history database (also: `FFF_HISTORY_DB` env)
+- `PI_FFF_MULTIGREP=0` — disable `fff-multi-grep` (enabled by default)
 
 ## Data
 

@@ -139,6 +139,7 @@ export function fffFileAnnotation(item: {
   gitStatus?: string;
   totalFrecencyScore?: number;
   accessFrecencyScore?: number;
+  patternIndices?: number[];
 }): string {
   const git = item.gitStatus;
   if (git && git !== "clean" && git !== "unknown" && git !== "") {
@@ -152,6 +153,15 @@ export function fffFileAnnotation(item: {
   return "";
 }
 
+/** Compact label for a single pattern index range. */
+function formatPatternLabel(indices: Set<number>): string {
+  if (indices.size === 0) return "";
+  if (indices.size === 1) return ` [${[...indices][0]}]`;
+  // Show sorted compact range
+  const sorted = [...indices].sort((a, b) => a - b);
+  return ` [${sorted.join(",")}]`;
+}
+
 // fff-core native definition classifier (byte-level scanner in Rust) is enabled
 // via GrepOptions.classifyDefinitions. Each GrepMatch carries isDefinition for
 // downstream consumers; pi-fff does NOT use it to re-sort.
@@ -163,19 +173,31 @@ export function fffFileAnnotation(item: {
 // engine emits them that way.
 
 function formatGrepOutput(result: GrepResult): string {
-  if (result.items.length === 0) return "No matches found";
+  if (result.items.length === 0) {
+    if (result.regexFallbackError) return result.regexFallbackError;
+    return "No matches found";
+  }
 
   // Build file-grouped output in the order files first appear in the result.
   // This preserves native frecency ordering across files without re-sorting.
   const lines: string[] = [];
   let currentFile = "";
+  let currentFilePatterns: Set<number> | null = null;
   let _shown = 0;
+
+  // Detect if this is a multi-pattern result by checking first match
+  const isMultiPattern = result.items[0]?.patternIndices !== undefined;
 
   for (const match of result.items) {
     if (match.relativePath !== currentFile) {
       if (lines.length > 0) lines.push("");
       currentFile = match.relativePath;
-      lines.push(`${currentFile}${fffFileAnnotation(match)}`);
+      currentFilePatterns = isMultiPattern ? new Set() : null;
+
+      let header = currentFile;
+      const annotation = fffFileAnnotation(match);
+      if (annotation) header += annotation;
+      lines.push(header);
     }
 
     match.contextBefore?.forEach((line: string, i: number) => {
@@ -183,7 +205,22 @@ function formatGrepOutput(result: GrepResult): string {
       lines.push(` ${lineNum}- ${truncateLine(line)}`);
     });
 
-    lines.push(` ${match.lineNumber}: ${truncateLine(match.lineContent)}`);
+    // Build pattern prefix for this match line
+    let patternPrefix = "";
+    if (isMultiPattern && match.patternIndices) {
+      const uniqueIndices = new Set(match.patternIndices);
+      if (uniqueIndices.size === 1) {
+        patternPrefix = `[${[...uniqueIndices][0]}] `;
+        currentFilePatterns?.add([...uniqueIndices][0]);
+      } else {
+        // Multiple patterns on same line — show all
+        const sorted = [...uniqueIndices].sort((a, b) => a - b);
+        patternPrefix = `[${sorted.join("+")}] `;
+        sorted.forEach((i) => currentFilePatterns?.add(i));
+      }
+    }
+
+    lines.push(` ${patternPrefix}${match.lineNumber}: ${truncateLine(match.lineContent)}`);
     _shown++;
 
     match.contextAfter?.forEach((line: string, i: number) => {
@@ -803,6 +840,7 @@ export default function fffExtension(pi: ExtensionAPI) {
       "caseSensitive: true when you need exact case (smart-case otherwise).",
       "Never combine paths in one call. For multiple files, make separate grep calls.",
       "After 1-2 greps, read the top match instead of more greps.",
+      "When you need OR-logic across multiple patterns (e.g., naming variants like validate_input, ValidateInput, validateInput), use multi_grep with a patterns array instead of sequential grep calls.",
     ],
     parameters: grepSchema,
 
@@ -1162,8 +1200,8 @@ export default function fffExtension(pi: ExtensionAPI) {
   });
 
   // --- multi_grep tool ---
-  // My latest tests are showing that the multi grep tool is only harmful, trying to get rid of it
-  const enableMultiGrep = process.env.PI_FFF_MULTIGREP === "1";
+  // Enabled by default. Disable with `PI_FFF_MULTIGREP=0`
+  const enableMultiGrep = process.env.PI_FFF_MULTIGREP !== "0";
 
   if (enableMultiGrep) {
     const multiGrepSchema = Type.Object({
@@ -1173,6 +1211,12 @@ export default function fffExtension(pi: ExtensionAPI) {
       }),
       constraints: Type.Optional(
         Type.String({ description: "File filter, e.g. '*.{ts,tsx} !test/'" }),
+      ),
+      includeIgnored: Type.Optional(
+        Type.Boolean({
+          description:
+            "Include files matched by .gitignore, .ignore, git excludes, and global gitignore. Default false. Use when the target file or directory exists but normal search cannot see it because it is ignored, such as node_modules or build output.",
+        }),
       ),
       context: Type.Optional(Type.Number({ description: "Context lines before+after" })),
       limit: Type.Optional(
@@ -1191,7 +1235,8 @@ export default function fffExtension(pi: ExtensionAPI) {
       promptSnippet: "Multi-pattern OR content search",
       promptGuidelines: [
         "Use when searching for several identifiers at once.",
-        "Include all naming-convention variants (snake/camel/Pascal).",
+        "Include naming variants (snake/camel/Pascal) — but limit to 2-6 specific patterns that actually appear in the codebase. The tool caps at 20 patterns.",
+        "Use includeIgnored: true only when you intentionally need .gitignored files such as node_modules, build output, or generated artifacts.",
         "Patterns are literal. Use constraints for file filters.",
       ],
       parameters: multiGrepSchema,
@@ -1202,23 +1247,32 @@ export default function fffExtension(pi: ExtensionAPI) {
           throw new Error("patterns array must have at least 1 element");
 
         const effectiveLimit = Math.max(1, params.limit ?? DEFAULT_GREP_LIMIT);
+        const storedCursor = params.cursor ? getCursor(params.cursor) : undefined;
+        const includeIgnored = storedCursor?.includeIgnored ?? params.includeIgnored === true;
 
-        const grepResult = await withFinderLease(activeCwd, (finder) =>
-          finder.multiGrep({
-            patterns: params.patterns,
-            constraints: params.constraints,
-            maxMatchesPerFile: Math.min(effectiveLimit, 50),
-            smartCase: true,
-            cursor: (params.cursor ? getCursor(params.cursor)?.cursor : null) ?? null,
-            beforeContext: params.context ?? 0,
-            afterContext: params.context ?? 0,
-          }),
+        const grepResult = await withFinderLease(
+          activeCwd,
+          (finder) =>
+            finder.multiGrep({
+              patterns: params.patterns,
+              constraints: params.constraints,
+              maxMatchesPerFile: Math.min(effectiveLimit, 50),
+              smartCase: true,
+              cursor: storedCursor?.cursor ?? null,
+              beforeContext: params.context ?? 0,
+              afterContext: params.context ?? 0,
+              classifyDefinitions: true,
+            }),
+          includeIgnored,
         );
 
         if (!grepResult.ok) throw new Error(grepResult.error);
 
         const result = grepResult.value;
-        if (result.items.length === 0) throw new Error("No matches found");
+        if (result.items.length === 0) {
+          if (result.regexFallbackError) throw new Error(result.regexFallbackError);
+          throw new Error("No matches found");
+        }
 
         let output = formatGrepOutput(result);
 
@@ -1227,8 +1281,9 @@ export default function fffExtension(pi: ExtensionAPI) {
           notices.push(`${effectiveLimit}+ matches (refine patterns)`);
         if (result.nextCursor)
           notices.push(
-            `More available. cursor="${storeCursor(result.nextCursor)}" to continue`,
+            `More available. cursor="${storeCursor(result.nextCursor, includeIgnored)}" to continue`,
           );
+        if (includeIgnored) notices.unshift("ignored files included");
 
         if (notices.length > 0) output += `\n\n[${notices.join(". ")}]`;
 

@@ -876,6 +876,68 @@ function parseGrepResult(rawPtr: JsExternal): Result<GrepResult> {
     items.push(readGrepMatchFromRaw(rawMatch));
   }
 
+  // Load multi-pattern indices if present
+  const hasPatternIndices = load({
+    library: LIBRARY_KEY,
+    funcName: "fff_grep_result_has_pattern_indices",
+    retType: DataType.Boolean,
+    paramsType: [DataType.External],
+    paramsValue: [handlePtr],
+  }) as boolean;
+
+  if (hasPatternIndices) {
+    // Get total count across all matches (sum of matchRanges lengths)
+    const totalRanges = load({
+      library: LIBRARY_KEY,
+      funcName: "fff_grep_result_get_pattern_indices_count",
+      retType: DataType.U32,
+      paramsType: [DataType.External],
+      paramsValue: [handlePtr],
+    }) as number;
+
+    if (totalRanges > 0) {
+      // Get flat array pointer
+      const indicesPtr = load({
+        library: LIBRARY_KEY,
+        funcName: "fff_grep_result_get_pattern_indices",
+        retType: DataType.External,
+        paramsType: [DataType.External],
+        paramsValue: [handlePtr],
+      }) as JsExternal;
+
+      if (!isNullPointer(indicesPtr)) {
+        // Read flat u32 array
+        const flatIndices: number[] = [];
+        for (let j = 0; j < totalRanges; j++) {
+          const [pi] = restorePointer({
+            retType: [DataType.U32],
+            paramsValue: [ptrOffset(indicesPtr, j * 4)],
+          }) as unknown as [number];
+          flatIndices.push(pi);
+        }
+
+        // Distribute per-match in lockstep with matchRanges
+        let idx = 0;
+        for (const match of items) {
+          const rangeCount = match.matchRanges.length;
+          if (rangeCount > 0 && idx < flatIndices.length) {
+            match.patternIndices = flatIndices.slice(idx, idx + rangeCount);
+            idx += rangeCount;
+          }
+        }
+
+        // Free the pattern indices array
+        load({
+          library: LIBRARY_KEY,
+          funcName: "fff_free_u32_array",
+          retType: DataType.Void,
+          paramsType: [DataType.External, DataType.U32],
+          paramsValue: [indicesPtr, totalRanges],
+        });
+      }
+    }
+  }
+
   // Free native grep result
   load({
     library: LIBRARY_KEY,

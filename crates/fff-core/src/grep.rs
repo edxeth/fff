@@ -270,6 +270,11 @@ pub struct GrepMatch {
     /// Byte offsets `(start, end)` within `line_content` for each match.
     /// Stack-allocated for the common case of ≤4 spans per line.
     pub match_byte_offsets: SmallVec<[(u32, u32); 4]>,
+    /// Pattern index per match span, in lockstep with `match_byte_offsets`.
+    /// Only populated in multi-pattern (Aho-Corasick) mode; empty for single-pattern grep.
+    /// Each entry maps the corresponding span in `match_byte_offsets` to the
+    /// input pattern index that produced it.
+    pub match_pattern_indices: Vec<u32>,
     /// Fuzzy match score from neo_frizbee (only set in Fuzzy grep mode).
     pub fuzzy_score: Option<u16>,
     /// Whether the matched line looks like a definition (struct, fn, class, etc.).
@@ -621,6 +626,7 @@ impl SinkState {
         byte_offset: u64,
         line_content: String,
         match_byte_offsets: SmallVec<[(u32, u32); 4]>,
+        match_pattern_indices: Vec<u32>,
         context_before: Vec<String>,
         context_after: Vec<String>,
     ) {
@@ -632,6 +638,7 @@ impl SinkState {
             byte_offset,
             line_content,
             match_byte_offsets,
+            match_pattern_indices,
             fuzzy_score: None,
             is_definition,
             context_before,
@@ -793,6 +800,7 @@ impl Sink for PlainTextSink<'_> {
             byte_offset,
             line_content,
             match_byte_offsets,
+            Vec::new(),
             context_before,
             context_after,
         );
@@ -851,6 +859,7 @@ impl Sink for RegexSink<'_> {
             byte_offset,
             line_content,
             match_byte_offsets,
+            Vec::new(),
             context_before,
             context_after,
         );
@@ -908,6 +917,7 @@ impl Sink for AhoCorasickSink<'_> {
 
         let line_content = String::from_utf8_lossy(display_bytes).into_owned();
         let mut match_byte_offsets: SmallVec<[(u32, u32); 4]> = SmallVec::new();
+        let mut match_pattern_indices: Vec<u32> = Vec::new();
         let mut col = 0usize;
         let mut first = true;
 
@@ -919,6 +929,7 @@ impl Sink for AhoCorasickSink<'_> {
                 first = false;
             }
             match_byte_offsets.push((abs_start, abs_end));
+            match_pattern_indices.push(m.pattern().as_usize() as u32);
         }
 
         let (context_before, context_after) = self.state.extract_context(mat);
@@ -928,6 +939,7 @@ impl Sink for AhoCorasickSink<'_> {
             byte_offset,
             line_content,
             match_byte_offsets,
+            match_pattern_indices,
             context_before,
             context_after,
         );
@@ -970,12 +982,30 @@ pub(crate) fn multi_grep_search<'a>(
         };
     }
 
+    // Cap patterns to prevent token-furnace scenarios (e.g. GLM dumping 348
+    // speculative patterns). 20 is generous headroom for any realistic
+    // naming-variant search (snake + Pascal + camel + 2-3 compounds).
+    const MAX_MULTI_PATTERNS: usize = 20;
+    if patterns.len() > MAX_MULTI_PATTERNS {
+        return GrepResult {
+            total_files,
+            filtered_file_count: total_files,
+            regex_fallback_error: Some(format!(
+                "multi_grep supports at most {} patterns, got {}. Narrow your pattern list to variants that actually appear in the codebase.",
+                MAX_MULTI_PATTERNS,
+                patterns.len(),
+            )),
+            ..Default::default()
+        };
+    }
+
     // Bigram prefiltering: OR the candidate bitsets for each pattern.
     // A file is a candidate if it matches ANY of the patterns' bigrams.
     let bigram_candidates = if let Some(idx) = bigram_index
         && idx.is_ready()
     {
         let mut combined: Option<Vec<u64>> = None;
+        let mut all_patterns_have_candidates = true;
         for pattern in patterns {
             if let Some(candidates) = idx.query(pattern.as_bytes()) {
                 combined = Some(match combined {
@@ -988,10 +1018,18 @@ pub(crate) fn multi_grep_search<'a>(
                         acc
                     }
                 });
+            } else {
+                // Pattern has no bigram candidates (too short, no bigrams, etc).
+                // We cannot safely prefilter — files matching only this pattern
+                // would be incorrectly excluded. Disable bigram prefiltering.
+                all_patterns_have_candidates = false;
+                break;
             }
         }
 
-        if let Some(ref mut candidates) = combined
+        if !all_patterns_have_candidates {
+            None
+        } else if let Some(ref mut candidates) = combined
             && let Some(overlay) = bigram_overlay
         {
             for pattern in patterns {
@@ -1003,9 +1041,10 @@ pub(crate) fn multi_grep_search<'a>(
                     }
                 }
             }
+            combined
+        } else {
+            combined
         }
-
-        combined
     } else {
         None
     };
@@ -1811,6 +1850,7 @@ fn fuzzy_grep_search<'a>(
                             && is_definition_line(display_line),
                         line_content: display_line.to_string(),
                         match_byte_offsets,
+                        match_pattern_indices: Vec::new(),
                         fuzzy_score: Some(match_indices.score),
                         context_before: Vec::new(),
                         context_after: Vec::new(),
@@ -2460,6 +2500,35 @@ mod tests {
         assert!(has_grep_match, "Should find GrepMatch");
         assert!(has_plain_text_matcher, "Should find PlainTextMatcher");
 
+        // Verify pattern indices: each match should have populated pattern indices
+        // in lockstep with match_byte_offsets
+        for m in &result.matches {
+            assert_eq!(
+                m.match_pattern_indices.len(),
+                m.match_byte_offsets.len(),
+                "Pattern indices must be in lockstep with match byte offsets for match at line {}",
+                m.line_number,
+            );
+            if m.line_content.contains("GrepMode") {
+                assert!(
+                    m.match_pattern_indices.iter().any(|&pi| pi == 0),
+                    "GrepMode should be from pattern 0"
+                );
+            }
+            if m.line_content.contains("GrepMatch") {
+                assert!(
+                    m.match_pattern_indices.iter().any(|&pi| pi == 1),
+                    "GrepMatch should be from pattern 1"
+                );
+            }
+            if m.line_content.contains("PlainTextMatcher") {
+                assert!(
+                    m.match_pattern_indices.iter().any(|&pi| pi == 2),
+                    "PlainTextMatcher should be from pattern 2"
+                );
+            }
+        }
+
         assert_eq!(result.files.len(), 2, "Should match exactly 2 files");
 
         // Test with single pattern
@@ -2500,6 +2569,121 @@ mod tests {
             result3.matches.len(),
             0,
             "Empty patterns should find nothing"
+        );
+    }
+
+    #[test]
+    fn test_multi_grep_per_span_pattern_indices() {
+        use crate::file_picker::{FilePicker, FilePickerOptions};
+        use std::io::Write;
+        use std::sync::atomic::AtomicBool;
+
+        let dir = tempfile::tempdir().unwrap();
+        // Create a file with a line containing TWO different patterns
+        {
+            let mut f = std::fs::File::create(dir.path().join("multi.rs")).unwrap();
+            writeln!(f, "fn validate_foo() {{}}").unwrap();
+            writeln!(f, "fn validate_bar() {{}}").unwrap();
+            // Line with both patterns
+            writeln!(f, "validate_foo and validate_bar together").unwrap();
+        }
+
+        let mut picker = FilePicker::new(FilePickerOptions {
+            base_path: dir.path().to_str().unwrap().into(),
+            watch: false,
+            ..Default::default()
+        })
+        .unwrap();
+        picker.collect_files().unwrap();
+
+        let files = picker.get_files();
+        let arena = picker.arena_base_ptr();
+
+        let options = super::GrepSearchOptions {
+            max_file_size: 10 * 1024 * 1024,
+            max_matches_per_file: 0,
+            smart_case: true,
+            file_offset: 0,
+            page_limit: 100,
+            mode: super::GrepMode::PlainText,
+            time_budget_ms: 0,
+            before_context: 0,
+            after_context: 0,
+            classify_definitions: false,
+            trim_whitespace: false,
+            abort_signal: None,
+        };
+        let no_cancel = AtomicBool::new(false);
+
+        let result = super::multi_grep_search(
+            files,
+            &["validate_foo", "validate_bar"],
+            &[],
+            &options,
+            picker.cache_budget(),
+            None,
+            None,
+            &no_cancel,
+            dir.path(),
+            arena,
+            arena,
+        );
+
+        // Filter to only the file we care about (in case other files exist)
+        let multi_rs_matches: Vec<_> = result
+            .matches
+            .iter()
+            .filter(|m| {
+                let f = result.files[m.file_index];
+                f.relative_path(&picker).ends_with("multi.rs")
+            })
+            .cloned()
+            .collect();
+        assert_eq!(multi_rs_matches.len(), 3, "Expected 3 matches in multi.rs");
+
+        // Sort by line number to ensure deterministic ordering
+        let mut sorted = multi_rs_matches.clone();
+        sorted.sort_by_key(|m| m.line_number);
+
+        // Line 1: "fn validate_foo() {}" — one span, pattern 0
+        assert_eq!(
+            sorted[0].match_byte_offsets.len(),
+            1,
+            "Line 1 should have 1 match span"
+        );
+        assert_eq!(
+            sorted[0].match_pattern_indices,
+            vec![0],
+            "Line 1 should be pattern 0"
+        );
+
+        // Line 2: "fn validate_bar() {}" — one span, pattern 1
+        assert_eq!(
+            sorted[1].match_byte_offsets.len(),
+            1,
+            "Line 2 should have 1 match span"
+        );
+        assert_eq!(
+            sorted[1].match_pattern_indices,
+            vec![1],
+            "Line 2 should be pattern 1"
+        );
+
+        // Line 3: "validate_foo and validate_bar together" — TWO spans
+        assert_eq!(
+            sorted[2].match_byte_offsets.len(),
+            2,
+            "Line 3 should have 2 match spans"
+        );
+        assert_eq!(
+            sorted[2].match_pattern_indices.len(),
+            2,
+            "Line 3 should have 2 pattern indices"
+        );
+        assert_eq!(
+            sorted[2].match_pattern_indices,
+            vec![0, 1],
+            "Line 3 should have patterns 0 and 1"
         );
     }
 

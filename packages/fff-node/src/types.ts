@@ -408,6 +408,13 @@ export interface GrepMatch {
   contextAfter?: string[];
   /** Whether this line is a code definition (only populated when `classifyDefinitions: true`). */
   isDefinition?: boolean;
+  /**
+   * Pattern index per match range, in lockstep with `matchRanges`.
+   * Only populated for multi-pattern (Aho-Corasick) grep results — absent for
+   * single-pattern grep. Each entry maps the corresponding range in
+   * `matchRanges` to the input pattern index that produced it.
+   */
+  patternIndices?: number[];
 }
 
 /**

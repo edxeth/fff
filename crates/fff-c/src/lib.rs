@@ -780,7 +780,21 @@ pub unsafe extern "C" fn fff_multi_grep(
     };
 
     let result = picker.multi_grep(&patterns, constraint_refs, &options);
+
+    // Extract pattern indices before consuming result into C struct
+    let pattern_indices: Vec<Vec<u32>> = result
+        .matches
+        .iter()
+        .map(|m| m.match_pattern_indices.clone())
+        .collect();
+
     let grep_result = FffGrepResult::from_core(&result, picker);
+
+    // Store pattern indices in side table if any match has them
+    if pattern_indices.iter().any(|pi| !pi.is_empty()) {
+        ffi_types::store_pattern_indices(grep_result, pattern_indices);
+    }
+
     FffResult::ok_handle(grep_result as *mut c_void)
 }
 
@@ -1412,6 +1426,9 @@ pub unsafe extern "C" fn fff_free_grep_result(result: *mut FffGrepResult) {
     }
 
     unsafe {
+        // Clean up pattern indices before the result pointer becomes invalid
+        ffi_types::remove_pattern_indices(result);
+
         let result = Box::from_raw(result);
         let count = result.count as usize;
 
@@ -1447,6 +1464,92 @@ pub unsafe extern "C" fn fff_grep_result_get_match(
         return std::ptr::null();
     }
     unsafe { result.items.add(index as usize) }
+}
+
+/// Check if a grep result has multi-pattern indices attached.
+///
+/// Returns true only for results from `fff_multi_grep` where the input had
+/// multiple patterns. Single-pattern grep results always return false.
+///
+/// ## Safety
+/// `result` must be a valid `FffGrepResult` pointer from `fff_live_grep` or `fff_multi_grep`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_grep_result_has_pattern_indices(
+    result: *const FffGrepResult,
+) -> bool {
+    if result.is_null() {
+        return false;
+    }
+    ffi_types::PATTERN_INDICES
+        .lock()
+        .map(|map| map.contains_key(&(result as usize)))
+        .unwrap_or(false)
+}
+
+/// Get the flat array of per-span pattern indices for a multi-grep result.
+///
+/// Returns a pointer to a heap-allocated `u32` array, one entry per match span
+/// across all matches (in match-order, range-order). The caller already knows
+/// the expected count (sum of `match_ranges_count` across all matches).
+/// The caller must free the returned array with `fff_free_u32_array`.
+///
+/// Returns null if `result` is null or has no pattern indices.
+///
+/// ## Safety
+/// `result` must be a valid `FffGrepResult` pointer from `fff_multi_grep`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_grep_result_get_pattern_indices(
+    result: *const FffGrepResult,
+) -> *mut u32 {
+    if result.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    let flat = ffi_types::PATTERN_INDICES.lock().map(|map| {
+        map.get(&(result as usize))
+            .map(|per_match| {
+                per_match.iter().flatten().copied().collect::<Vec<u32>>()
+            })
+            .unwrap_or_default()
+    });
+
+    match flat {
+        Ok(v) if !v.is_empty() => {
+            let _count = v.len();
+            // Convert to boxed slice for an exactly-sized allocation.
+            // This avoids the Vec capacity ≥ length issue when freeing.
+            let boxed = v.into_boxed_slice();
+            let ptr = boxed.as_ptr() as *mut u32;
+            std::mem::forget(boxed); // ownership transferred to caller
+            ptr
+        }
+        _ => std::ptr::null_mut(),
+    }
+}
+
+/// Get the total number of pattern index entries for a multi-grep result.
+///
+/// Returns the sum of `match_ranges_count` across all matches. Returns 0 if
+/// the result has no pattern indices. Use this to know the size of the array
+/// returned by `fff_grep_result_get_pattern_indices` before calling it.
+///
+/// ## Safety
+/// `result` must be a valid `FffGrepResult` pointer from `fff_multi_grep`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_grep_result_get_pattern_indices_count(
+    result: *const FffGrepResult,
+) -> u32 {
+    if result.is_null() {
+        return 0;
+    }
+    ffi_types::PATTERN_INDICES
+        .lock()
+        .map(|map| {
+            map.get(&(result as usize))
+                .map(|per_match| per_match.iter().map(|v| v.len() as u32).sum::<u32>())
+                .unwrap_or(0)
+        })
+        .unwrap_or(0)
 }
 
 /// Free a scan progress result returned by `fff_get_scan_progress`.
@@ -1507,6 +1610,23 @@ pub unsafe extern "C" fn fff_free_string(s: *mut c_char) {
         if !s.is_null() {
             drop(CString::from_raw(s));
         }
+    }
+}
+
+/// Free a `u32` array returned by `fff_grep_result_get_pattern_indices`.
+///
+/// ## Safety
+/// `arr` must be a valid pointer previously returned by
+/// `fff_grep_result_get_pattern_indices`, or null (no-op).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_free_u32_array(arr: *mut u32, count: u32) {
+    if arr.is_null() || count == 0 {
+        return;
+    }
+    unsafe {
+        // Reconstruct the boxed slice (exactly-sized allocation from into_boxed_slice).
+        let slice_ptr = std::ptr::slice_from_raw_parts_mut(arr, count as usize);
+        drop(Box::from_raw(slice_ptr));
     }
 }
 
