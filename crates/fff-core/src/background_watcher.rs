@@ -41,6 +41,7 @@ impl BackgroundWatcher {
         shared_picker: SharedFilePicker,
         shared_frecency: SharedFrecency,
         mode: FFFMode,
+        include_ignored: bool,
     ) -> Result<Self, Error> {
         info!(
             "Initializing background watcher for path: {}, mode: {:?}",
@@ -91,6 +92,7 @@ impl BackgroundWatcher {
             shared_picker,
             shared_frecency,
             mode,
+            include_ignored,
             use_recursive,
             watch_tx_for_debouncer,
         )?;
@@ -145,6 +147,7 @@ impl BackgroundWatcher {
                         &strong_picker,
                         &owner_frecency,
                         &owner_git_workdir,
+                        include_ignored,
                     );
 
                     // Transient strong ref drops here, back
@@ -168,6 +171,7 @@ impl BackgroundWatcher {
         shared_picker: SharedFilePicker,
         shared_frecency: SharedFrecency,
         mode: FFFMode,
+        include_ignored: bool,
         use_recursive: bool,
         watch_tx: mpsc::Sender<PathBuf>,
     ) -> Result<Debouncer, Error> {
@@ -212,6 +216,7 @@ impl BackgroundWatcher {
                             &strong_picker,
                             &shared_frecency,
                             mode,
+                            include_ignored,
                         );
 
                         // every new directory creates had to be reflected in the picker state
@@ -399,6 +404,7 @@ fn handle_debounced_events(
     shared_picker: &SharedFilePicker,
     shared_frecency: &SharedFrecency,
     mode: FFFMode,
+    include_ignored: bool,
 ) -> Vec<PathBuf> {
     // this will be called very often, we have to minimiy the lock time for file picker
     let repo = git_workdir.as_ref().and_then(|p| Repository::open(p).ok());
@@ -485,12 +491,12 @@ fn handle_debounced_events(
                 // New directory — collect it so the caller can register a
                 // watcher. No filesystem scanning: files that arrive later
                 // will be handled by the newly registered watch.
-                if !is_path_ignored(path, &repo) {
+                if include_ignored || !is_path_ignored(path, &repo) {
                     new_dirs_to_watch.push(path.to_path_buf());
                 }
             } else {
-                // For additions/modifications, still filter gitignored files.
-                if should_include_file(path, &repo) {
+                // For additions/modifications, still filter ignored files unless requested.
+                if should_include_file(path, &repo, include_ignored) {
                     paths_to_add_or_modify.push(path.as_path());
                 }
             }
@@ -697,6 +703,7 @@ fn track_files_from_new_directories(
     shared_picker: &SharedFilePicker,
     shared_frecency: &SharedFrecency,
     git_workdir: &Option<PathBuf>,
+    include_ignored: bool,
 ) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -708,7 +715,7 @@ fn track_files_from_new_directories(
     for entry in entries.flatten() {
         if entry.file_type().is_ok_and(|ft| ft.is_file()) {
             let path = entry.path();
-            if should_include_file(&path, &repo) {
+            if should_include_file(&path, &repo, include_ignored) {
                 files_to_add.push(path);
             }
         }
@@ -756,10 +763,13 @@ fn track_files_from_new_directories(
     );
 }
 
-fn should_include_file(path: &Path, repo: &Option<Repository>) -> bool {
+fn should_include_file(path: &Path, repo: &Option<Repository>, include_ignored: bool) -> bool {
     // Directories are not indexed — only regular files (and symlinks to files).
     if path.is_dir() {
         return false;
+    }
+    if include_ignored {
+        return true;
     }
 
     match repo.as_ref() {

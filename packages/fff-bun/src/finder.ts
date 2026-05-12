@@ -16,6 +16,7 @@ import {
   ffiGetHistoricalQuery,
   ffiGetScanProgress,
   ffiHealthCheck,
+  ffiIsPathIgnored,
   ffiIsScanning,
   ffiLiveGrep,
   ffiMultiGrep,
@@ -122,6 +123,7 @@ export class FileFinder {
       BigInt(options.cacheBudgetMaxFiles ?? 0),
       BigInt(options.cacheBudgetMaxBytes ?? 0),
       BigInt(options.cacheBudgetMaxFileSize ?? 0),
+      options.includeIgnored ?? false,
     );
 
     if (!result.ok) {
@@ -405,6 +407,15 @@ export class FileFinder {
     const guard = this.ensureAlive();
     if (!guard.ok) return guard;
     return ffiGetBasePath(guard.value);
+  }
+
+  /**
+   * Check whether a path is excluded by scanner ignore rules.
+   */
+  isPathIgnored(path: string): Result<boolean> {
+    const guard = this.ensureAlive();
+    if (!guard.ok) return guard;
+    return ffiIsPathIgnored(guard.value, path);
   }
 
   /**

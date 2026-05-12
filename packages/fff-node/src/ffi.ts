@@ -339,11 +339,12 @@ export function ffiCreate(
   cacheBudgetMaxFiles: number,
   cacheBudgetMaxBytes: number,
   cacheBudgetMaxFileSize: number,
+  includeIgnored: boolean,
 ): Result<NativeHandle> {
   loadLibrary();
 
   const { rawPtr, struct: structData } = callRaw(
-    "fff_create_instance2",
+    "fff_create_instance3",
     [
       DataType.String, // base_path
       DataType.String, // frecency_db_path
@@ -358,6 +359,7 @@ export function ffiCreate(
       DataType.U64, // cache_budget_max_files
       DataType.U64, // cache_budget_max_bytes
       DataType.U64, // cache_budget_max_file_size
+      DataType.Boolean, // include_ignored
     ],
     [
       basePath,
@@ -373,6 +375,7 @@ export function ffiCreate(
       cacheBudgetMaxFiles,
       cacheBudgetMaxBytes,
       cacheBudgetMaxFileSize,
+      includeIgnored,
     ],
   );
 
@@ -382,7 +385,7 @@ export function ffiCreate(
     if (success) {
       const handle = structData.handle;
       if (isNullPointer(handle)) {
-        return err("fff_create_instance2 returned null handle");
+        return err("fff_create_instance3 returned null handle");
       }
       return { ok: true, value: handle };
     } else {
@@ -1423,6 +1426,17 @@ export function ffiIsScanning(handle: NativeHandle): boolean {
  */
 export function ffiGetBasePath(handle: NativeHandle): Result<string | null> {
   return callStringResult("fff_get_base_path", [DataType.External], [handle]);
+}
+
+/**
+ * Check whether a path is excluded by scanner ignore rules.
+ */
+export function ffiIsPathIgnored(handle: NativeHandle, path: string): Result<boolean> {
+  return callBoolResult(
+    "fff_is_path_ignored",
+    [DataType.External, DataType.String],
+    [handle, path],
+  );
 }
 
 // FffScanProgress struct definition

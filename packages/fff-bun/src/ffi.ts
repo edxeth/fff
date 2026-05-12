@@ -44,7 +44,7 @@ function grepModeToU8(mode?: string): number {
 }
 
 const ffiDefinition = {
-  fff_create_instance2: {
+  fff_create_instance3: {
     args: [
       FFIType.cstring, // base_path
       FFIType.cstring, // frecency_db_path
@@ -59,6 +59,7 @@ const ffiDefinition = {
       FFIType.u64, // cache_budget_max_files
       FFIType.u64, // cache_budget_max_bytes
       FFIType.u64, // cache_budget_max_file_size
+      FFIType.bool, // include_ignored
     ],
     returns: FFIType.ptr,
   },
@@ -159,6 +160,10 @@ const ffiDefinition = {
   },
   fff_get_base_path: {
     args: [FFIType.ptr],
+    returns: FFIType.ptr,
+  },
+  fff_is_path_ignored: {
+    args: [FFIType.ptr, FFIType.cstring],
     returns: FFIType.ptr,
   },
   fff_get_scan_progress: {
@@ -435,9 +440,10 @@ export function ffiCreate(
   cacheBudgetMaxFiles: bigint,
   cacheBudgetMaxBytes: bigint,
   cacheBudgetMaxFileSize: bigint,
+  includeIgnored: boolean,
 ): Result<NativeHandle> {
   const library = loadLibrary();
-  const resultPtr = library.symbols.fff_create_instance2(
+  const resultPtr = library.symbols.fff_create_instance3(
     ptr(encodeString(basePath)),
     ptr(encodeString(frecencyDbPath)),
     ptr(encodeString(historyDbPath)),
@@ -451,6 +457,7 @@ export function ffiCreate(
     cacheBudgetMaxFiles,
     cacheBudgetMaxBytes,
     cacheBudgetMaxFileSize,
+    includeIgnored,
   );
 
   if (resultPtr === null) {
@@ -1161,6 +1168,15 @@ export function ffiGetBasePath(handle: NativeHandle): Result<string | null> {
   const library = loadLibrary();
   const resultPtr = library.symbols.fff_get_base_path(handle);
   return parseStringResult(resultPtr);
+}
+
+/**
+ * Check whether a path is excluded by scanner ignore rules.
+ */
+export function ffiIsPathIgnored(handle: NativeHandle, path: string): Result<boolean> {
+  const library = loadLibrary();
+  const resultPtr = library.symbols.fff_is_path_ignored(handle, ptr(encodeString(path)));
+  return parseBoolResult(resultPtr);
 }
 
 // FffScanProgress { scanned_files_count: u64(8), is_scanning: bool(1), is_watcher_ready: bool(1), is_warmup_complete: bool(1) + pad }

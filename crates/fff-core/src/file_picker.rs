@@ -449,6 +449,8 @@ pub struct FilePickerOptions {
     pub cache_budget: Option<ContentCacheBudget>,
     /// When `false`, `new_with_shared_state` skips the background file watcher.
     pub watch: bool,
+    /// Include files matched by .gitignore, .ignore, and git excludes.
+    pub include_ignored: bool,
 }
 
 impl Default for FilePickerOptions {
@@ -460,6 +462,7 @@ impl Default for FilePickerOptions {
             mode: FFFMode::default(),
             cache_budget: None,
             watch: true,
+            include_ignored: false,
         }
     }
 }
@@ -476,6 +479,7 @@ pub struct FilePicker {
     enable_mmap_cache: bool,
     enable_content_indexing: bool,
     watch: bool,
+    pub(crate) include_ignored: bool,
 }
 
 impl std::fmt::Debug for FilePicker {
@@ -529,8 +533,60 @@ impl FilePicker {
         self.watch
     }
 
+    pub fn includes_ignored(&self) -> bool {
+        self.include_ignored
+    }
+
     pub fn mode(&self) -> FFFMode {
         self.mode
+    }
+
+    pub fn is_path_ignored(&self, path: &str) -> bool {
+        if self.include_ignored {
+            return false;
+        }
+
+        let target = concrete_prefix_path(&self.base_path, path);
+        if !target.exists() || target == self.base_path {
+            return false;
+        }
+
+        let is_git_repo = self.sync_data.git_workdir.is_some();
+        if is_git_repo
+            && Repository::discover(&self.base_path)
+                .ok()
+                .is_some_and(|repo| repo.is_path_ignored(&target) == Ok(true))
+        {
+            return true;
+        }
+
+        let include_hidden = is_git_repo || self.mode.is_ai();
+        let mut walk_builder = ignore::WalkBuilder::new(&self.base_path);
+        walk_builder
+            .hidden(!include_hidden)
+            .git_ignore(true)
+            .git_exclude(true)
+            .git_global(true)
+            .ignore(true)
+            .follow_links(false)
+            .threads(1);
+
+        if !is_git_repo && let Some(overrides) = non_git_repo_overrides(&self.base_path) {
+            walk_builder.overrides(overrides);
+        }
+
+        for result in walk_builder.build() {
+            let Ok(entry) = result else { continue };
+            let entry_path = crate::path_utils::normalize(entry.path().to_path_buf());
+            if entry_path == target && !target.is_dir() {
+                return false;
+            }
+            if target.is_dir() && entry_path != target && entry_path.starts_with(&target) {
+                return false;
+            }
+        }
+
+        true
     }
 
     pub fn cache_budget(&self) -> &ContentCacheBudget {
@@ -722,6 +778,7 @@ impl FilePicker {
             enable_mmap_cache: options.enable_mmap_cache,
             enable_content_indexing: options.enable_content_indexing,
             watch: options.watch,
+            include_ignored: options.include_ignored,
         })
     }
 
@@ -746,6 +803,7 @@ impl FilePicker {
         let content_indexing = picker.enable_content_indexing;
         let watch = picker.watch;
         let mode = picker.mode;
+        let include_ignored = picker.include_ignored;
 
         let signals = picker.scan_signals();
         let scanned_files_counter = picker.scanned_files_counter();
@@ -773,6 +831,7 @@ impl FilePicker {
                 watch,
                 auto_cache_budget: true,
                 install_watcher: true,
+                include_ignored,
             },
         )
         .spawn();
@@ -802,6 +861,7 @@ impl FilePicker {
             &self.scanned_files_count,
             &empty_frecency,
             self.mode,
+            self.include_ignored,
         )?;
 
         self.sync_data = sync;
@@ -847,6 +907,7 @@ impl FilePicker {
             shared_picker.clone(),
             shared_frecency.clone(),
             self.mode,
+            self.include_ignored,
         )?;
         self.background_watcher = Some(watcher);
         self.signals.watcher_ready.store(true, Ordering::Release);
@@ -1801,6 +1862,7 @@ impl FileSync {
         synced_files_count: &Arc<AtomicUsize>,
         shared_frecency: &SharedFrecency,
         mode: FFFMode,
+        include_ignored: bool,
     ) -> Result<FileSync, Error> {
         use ignore::WalkBuilder;
 
@@ -1816,14 +1878,17 @@ impl FileSync {
         walk_builder
             // AI mode follows Pi built-ins: hidden paths stay searchable.
             .hidden(!include_hidden)
-            .git_ignore(true)
-            .git_exclude(true)
-            .git_global(true)
-            .ignore(true)
+            .git_ignore(!include_ignored)
+            .git_exclude(!include_ignored)
+            .git_global(!include_ignored)
+            .ignore(!include_ignored)
             .follow_links(false)
             .threads(bg_threads);
 
-        if !is_git_repo && let Some(overrides) = non_git_repo_overrides(base_path) {
+        if !include_ignored
+            && !is_git_repo
+            && let Some(overrides) = non_git_repo_overrides(base_path)
+        {
             walk_builder.overrides(overrides);
         }
 
@@ -2124,6 +2189,21 @@ fn common_dir_prefix_len(a: &str, b: &str) -> usize {
         }
     }
     last_sep
+}
+
+fn concrete_prefix_path(base_path: &Path, path: &str) -> PathBuf {
+    let glob_start = path
+        .find(|c| matches!(c, '*' | '?' | '[' | '{'))
+        .unwrap_or(path.len());
+    let prefix = path[..glob_start].trim_end_matches(['/', '\\']);
+    let raw = if prefix.is_empty() { path } else { prefix };
+    let candidate = Path::new(raw);
+    let joined = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        base_path.join(candidate)
+    };
+    crate::path_utils::normalize(joined)
 }
 
 /// Ask the global allocator to return freed pages to the OS.

@@ -14,7 +14,9 @@
 
 import { after, before, describe, it } from "node:test";
 import { strict as assert } from "node:assert";
-import { dirname, resolve } from "node:path";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { FileFinder, closeLibrary } from "../dist/src/index.js";
 
@@ -201,6 +203,49 @@ describe("fff-node", { concurrency: 1 }, () => {
         "  if (raw.context_before_count > 0) {",
       ]);
       assert.deepEqual(match.contextAfter, ["  }"]);
+    });
+  });
+
+  describe("ignored paths", { concurrency: 1 }, () => {
+    it("reports paths ignored by scanner rules", async () => {
+      const root = mkdtempSync(join(tmpdir(), "fff-ignore-status-"));
+      try {
+        writeFileSync(join(root, ".ignore"), "vendor/\n");
+        mkdirSync(join(root, "vendor"), { recursive: true });
+        writeFileSync(join(root, "vendor", "hidden.rb"), "TOKEN = true\n");
+        writeFileSync(join(root, "visible.rb"), "TOKEN = true\n");
+
+        const result = FileFinder.create({ basePath: root, disableWatch: true });
+        assert.ok(result.ok, `create failed: ${!result.ok ? result.error : ""}`);
+        const localFinder = result.value;
+        try {
+          const wait = await localFinder.waitForScan(5_000);
+          assert.ok(wait.ok && wait.value, "scan should finish");
+
+          assert.deepEqual(localFinder.isPathIgnored("vendor/**"), { ok: true, value: true });
+          assert.deepEqual(localFinder.isPathIgnored("visible.rb"), { ok: true, value: false });
+          assert.deepEqual(localFinder.isPathIgnored("missing/**"), { ok: true, value: false });
+        } finally {
+          localFinder.destroy();
+        }
+
+        const includeResult = FileFinder.create({
+          basePath: root,
+          disableWatch: true,
+          includeIgnored: true,
+        });
+        assert.ok(includeResult.ok, `create failed: ${!includeResult.ok ? includeResult.error : ""}`);
+        const includeFinder = includeResult.value;
+        try {
+          const wait = await includeFinder.waitForScan(5_000);
+          assert.ok(wait.ok && wait.value, "scan should finish");
+          assert.deepEqual(includeFinder.isPathIgnored("vendor/**"), { ok: true, value: false });
+        } finally {
+          includeFinder.destroy();
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
     });
   });
 

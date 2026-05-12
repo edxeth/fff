@@ -20,6 +20,7 @@ import type {
   GrepCursor,
   GrepMode,
   GrepResult,
+  InitOptions,
   MixedItem,
   SearchResult,
 } from "@edxeth/fff-node";
@@ -37,6 +38,7 @@ const GREP_MAX_LINE_LENGTH = 500;
 const MENTION_MAX_RESULTS = 20;
 
 type FffMode = "tools-and-ui" | "tools-only" | "override";
+type FffInitOptions = InitOptions & { includeIgnored?: boolean };
 
 const VALID_MODES: FffMode[] = ["tools-and-ui", "tools-only", "override"];
 
@@ -65,12 +67,17 @@ function resolveToolNames(mode: FffMode): ToolNames {
 // Cursor store — simple bounded Map for pagination cursors
 // ---------------------------------------------------------------------------
 
-const cursorCache = new Map<string, GrepCursor>();
+interface StoredGrepCursor {
+  cursor: GrepCursor;
+  includeIgnored: boolean;
+}
+
+const cursorCache = new Map<string, StoredGrepCursor>();
 let cursorCounter = 0;
 
-function storeCursor(cursor: GrepCursor): string {
+function storeCursor(cursor: GrepCursor, includeIgnored = false): string {
   const id = `fff_c${++cursorCounter}`;
-  cursorCache.set(id, cursor);
+  cursorCache.set(id, { cursor, includeIgnored });
   if (cursorCache.size > 200) {
     const first = cursorCache.keys().next().value;
     if (first) cursorCache.delete(first);
@@ -78,7 +85,7 @@ function storeCursor(cursor: GrepCursor): string {
   return id;
 }
 
-function getCursor(id: string): GrepCursor | undefined {
+function getCursor(id: string): StoredGrepCursor | undefined {
   return cursorCache.get(id);
 }
 
@@ -91,6 +98,7 @@ interface FindCursor {
   pattern: string;
   pageSize: number;
   nextPageIndex: number;
+  includeIgnored: boolean;
 }
 
 const findCursorCache = new Map<string, FindCursor>();
@@ -334,7 +342,7 @@ function createFffMentionProvider(
 
 export default function fffExtension(pi: ExtensionAPI) {
   const finders = new Map<string, FileFinder>();
-  let activeBasePath: string | null = null;
+  let activeFinderKey: string | null = null;
   // Concurrent ensureFinder() callers share in-flight promises by base path so
   // FileFinder.create() (which takes native DB locks) runs at most once per
   // base path at a time — otherwise parallel tool calls would race and
@@ -416,6 +424,27 @@ export default function fffExtension(pi: ExtensionAPI) {
       : `Path not found: ${statPath || pathConstraint}`;
   }
 
+  async function noResultsMessage(
+    base: string,
+    basePath: string,
+    pathConstraint: string | undefined,
+    includeIgnored: boolean,
+  ): Promise<string> {
+    if (includeIgnored || !pathConstraint) return base;
+
+    const ignored = await withFinderLease(basePath, (finder) => {
+      const checker = finder as FileFinder & {
+        isPathIgnored?: (path: string) => { ok: boolean; value?: boolean };
+      };
+      return checker.isPathIgnored?.(pathConstraint);
+    });
+
+    if (ignored?.ok && ignored.value === true) {
+      return `${base}. Path is ignored. Retry with \`includeIgnored: true\`.`;
+    }
+    return base;
+  }
+
   function absolutePathBase(pathConstraint: string): {
     basePath: string;
     pathConstraint?: string;
@@ -456,49 +485,55 @@ export default function fffExtension(pi: ExtensionAPI) {
     return { basePath: activeCwd, pathConstraint };
   }
 
+  function finderKey(basePath: string, includeIgnored: boolean): string {
+    return `${includeIgnored ? "ignored" : "normal"}:${basePath}`;
+  }
+
   function trimFinderCache() {
     while (finders.size >= MAX_CACHED_FINDERS) {
       const evictable = [...finders.entries()].find(
-        ([basePath]) => (finderActiveOps.get(basePath) ?? 0) === 0,
+        ([key]) => (finderActiveOps.get(key) ?? 0) === 0,
       );
       if (!evictable) return;
 
-      const [oldestBase, oldestFinder] = evictable;
+      const [oldestKey, oldestFinder] = evictable;
       if (!oldestFinder.isDestroyed) oldestFinder.destroy();
-      finders.delete(oldestBase);
-      if (activeBasePath === oldestBase) activeBasePath = null;
+      finders.delete(oldestKey);
+      if (activeFinderKey === oldestKey) activeFinderKey = null;
     }
   }
 
-  function ensureFinder(basePath: string): Promise<FileFinder> {
-    const existing = finders.get(basePath);
+  function ensureFinder(basePath: string, includeIgnored = false): Promise<FileFinder> {
+    const key = finderKey(basePath, includeIgnored);
+    const existing = finders.get(key);
     if (existing && !existing.isDestroyed) return Promise.resolve(existing);
-    const pending = finderPromises.get(basePath);
+    const pending = finderPromises.get(key);
     if (pending) return pending;
 
     const promise = (async () => {
       trimFinderCache();
-      const useDatabases = basePath === activeCwd;
+      const useDatabases = basePath === activeCwd && !includeIgnored;
       const result = FileFinder.create({
         basePath,
         frecencyDbPath: useDatabases ? frecencyDbPath : undefined,
         historyDbPath: useDatabases ? historyDbPath : undefined,
         aiMode: true,
-      });
+        includeIgnored,
+      } as FffInitOptions);
 
       if (!result.ok)
         throw new Error(`Failed to create FFF file finder: ${result.error}`);
 
       const finder = result.value;
-      finders.set(basePath, finder);
-      activeBasePath = basePath;
+      finders.set(key, finder);
+      if (!includeIgnored) activeFinderKey = key;
       await finder.waitForScan(15000);
       return finder;
     })().finally(() => {
-      finderPromises.delete(basePath);
+      finderPromises.delete(key);
     });
 
-    finderPromises.set(basePath, promise);
+    finderPromises.set(key, promise);
     return promise;
   }
 
@@ -509,20 +544,22 @@ export default function fffExtension(pi: ExtensionAPI) {
     finders.clear();
     finderLocks.clear();
     finderActiveOps.clear();
-    activeBasePath = null;
+    activeFinderKey = null;
   }
 
   async function withFinderLease<T>(
     basePath: string,
     work: (finder: FileFinder) => T | Promise<T>,
+    includeIgnored = false,
   ): Promise<T> {
-    const previous = finderLocks.get(basePath) ?? Promise.resolve();
+    const key = finderKey(basePath, includeIgnored);
+    const previous = finderLocks.get(key) ?? Promise.resolve();
     let release!: () => void;
     const current = new Promise<void>((resolve) => {
       release = resolve;
     });
     finderLocks.set(
-      basePath,
+      key,
       previous.then(
         () => current,
         () => current,
@@ -530,22 +567,22 @@ export default function fffExtension(pi: ExtensionAPI) {
     );
 
     await previous.catch(() => undefined);
-    finderActiveOps.set(basePath, (finderActiveOps.get(basePath) ?? 0) + 1);
+    finderActiveOps.set(key, (finderActiveOps.get(key) ?? 0) + 1);
     try {
-      const finder = await ensureFinder(basePath);
+      const finder = await ensureFinder(basePath, includeIgnored);
       return await work(finder);
     } finally {
-      const remaining = (finderActiveOps.get(basePath) ?? 1) - 1;
-      if (remaining > 0) finderActiveOps.set(basePath, remaining);
-      else finderActiveOps.delete(basePath);
+      const remaining = (finderActiveOps.get(key) ?? 1) - 1;
+      if (remaining > 0) finderActiveOps.set(key, remaining);
+      else finderActiveOps.delete(key);
       release();
-      if (finderLocks.get(basePath) === current) finderLocks.delete(basePath);
+      if (finderLocks.get(key) === current) finderLocks.delete(key);
     }
   }
 
   function getActiveFinder(): FileFinder | null {
-    if (!activeBasePath) return null;
-    const finder = finders.get(activeBasePath);
+    if (!activeFinderKey) return null;
+    const finder = finders.get(activeFinderKey);
     return finder && !finder.isDestroyed ? finder : null;
   }
 
@@ -729,6 +766,12 @@ export default function fffExtension(pi: ExtensionAPI) {
           "Exclude paths (comma/space-separated or array). Same syntax as path: directory prefix ('test/'), filename with extension ('config.json'), or glob ('*.min.js', '**/*.{rs,go}'). A leading '!' is optional and ignored — both 'test/' and '!test/' work. Example: 'test/,*.min.js,!vendor/'.",
       }),
     ),
+    includeIgnored: Type.Optional(
+      Type.Boolean({
+        description:
+          "Include files matched by .gitignore, .ignore, git excludes, and global gitignore. Default false. Use when the target file or directory exists but normal search cannot see it because it is ignored, such as node_modules or build output.",
+      }),
+    ),
     caseSensitive: Type.Optional(
       Type.Boolean({
         description:
@@ -756,6 +799,7 @@ export default function fffExtension(pi: ExtensionAPI) {
     promptGuidelines: [
       "Prefer bare identifiers as patterns. Literal queries are most efficient.",
       "Use path for include ('src/', '*.ts') and exclude for noise ('test/,*.min.js').",
+      "Use includeIgnored: true only when you intentionally need .gitignored files such as node_modules, build output, or generated artifacts.",
       "caseSensitive: true when you need exact case (smart-case otherwise).",
       "Never combine paths in one call. For multiple files, make separate grep calls.",
       "After 1-2 greps, read the top match instead of more greps.",
@@ -818,17 +862,22 @@ export default function fffExtension(pi: ExtensionAPI) {
       // caseSensitive override flips smartCase off; omitting it keeps smart-case
       // (case-insensitive when pattern is all lowercase).
       const smartCase = params.caseSensitive !== true;
+      const storedCursor = params.cursor ? getCursor(params.cursor) : undefined;
+      const includeIgnored = storedCursor?.includeIgnored ?? params.includeIgnored === true;
 
-      const grepResult = await withFinderLease(searchBase.basePath, (finder) =>
-        finder.grep(query, {
-          mode,
-          smartCase,
-          maxMatchesPerFile: Math.min(effectiveLimit, 50),
-          cursor: (params.cursor ? getCursor(params.cursor) : null) ?? null,
-          beforeContext: params.context ?? 0,
-          afterContext: params.context ?? 0,
-          classifyDefinitions: true,
-        }),
+      const grepResult = await withFinderLease(
+        searchBase.basePath,
+        (finder) =>
+          finder.grep(query, {
+            mode,
+            smartCase,
+            maxMatchesPerFile: Math.min(effectiveLimit, 50),
+            cursor: storedCursor?.cursor ?? null,
+            beforeContext: params.context ?? 0,
+            afterContext: params.context ?? 0,
+            classifyDefinitions: true,
+          }),
+        includeIgnored,
       );
 
       if (!grepResult.ok) throw new Error(grepResult.error);
@@ -843,16 +892,19 @@ export default function fffExtension(pi: ExtensionAPI) {
         !params.exclude &&
         mode !== "regex"
       ) {
-        const fuzzy = await withFinderLease(searchBase.basePath, (finder) =>
-          finder.grep(query, {
-            mode: "fuzzy",
-            smartCase,
-            maxMatchesPerFile: Math.min(effectiveLimit, 50),
-            cursor: null,
-            beforeContext: 0,
-            afterContext: 0,
-            classifyDefinitions: true,
-          }),
+        const fuzzy = await withFinderLease(
+          searchBase.basePath,
+          (finder) =>
+            finder.grep(query, {
+              mode: "fuzzy",
+              smartCase,
+              maxMatchesPerFile: Math.min(effectiveLimit, 50),
+              cursor: null,
+              beforeContext: 0,
+              afterContext: 0,
+              classifyDefinitions: true,
+            }),
+          includeIgnored,
         );
 
         if (fuzzy.ok && fuzzy.value.items.length > 0) {
@@ -861,7 +913,10 @@ export default function fffExtension(pi: ExtensionAPI) {
         }
       }
 
-      if (result.items.length === 0) throw new Error("No matches found");
+      if (result.items.length === 0)
+        throw new Error(
+          await noResultsMessage("No matches found", searchBase.basePath, params.path, includeIgnored),
+        );
 
       let output = formatGrepOutput(result);
       const notices: string[] = [];
@@ -869,8 +924,9 @@ export default function fffExtension(pi: ExtensionAPI) {
         notices.push(`Invalid regex: ${result.regexFallbackError}, used literal match`);
       }
       if (result.nextCursor) {
-        notices.push(`Continue with cursor="${storeCursor(result.nextCursor)}"`);
+        notices.push(`Continue with cursor="${storeCursor(result.nextCursor, includeIgnored)}"`);
       }
+      if (includeIgnored) notices.unshift("ignored files included");
 
       if (notices.length > 0) output += `\n\n[${notices.join(". ")}]`;
       if (fuzzyNotice) output = `[${fuzzyNotice}]\n${output}`;
@@ -924,6 +980,12 @@ export default function fffExtension(pi: ExtensionAPI) {
           "Exclude paths (comma/space-separated or array). Same syntax as path: directory prefix ('test/'), filename with extension ('config.json'), or glob ('*.min.js', '**/*.{rs,go}'). A leading '!' is optional and ignored — both 'test/' and '!test/' work. Example: 'test/,*.min.js,!vendor/'.",
       }),
     ),
+    includeIgnored: Type.Optional(
+      Type.Boolean({
+        description:
+          "Include files matched by .gitignore, .ignore, git excludes, and global gitignore. Default false. Use when the target file or directory exists but normal search cannot see it because it is ignored, such as node_modules or build output.",
+      }),
+    ),
     limit: Type.Optional(
       Type.Number({
         description: `Max results per page (default ${DEFAULT_FIND_LIMIT})`,
@@ -943,6 +1005,7 @@ export default function fffExtension(pi: ExtensionAPI) {
       "Matches the WHOLE path, not just the filename — `profile` hits `chrome/browser/profiles/x.cc` too.",
       "Keep queries to 1-2 terms; extra words narrow.",
       "Use one path constraint only: one file, directory, or glob.",
+      "Use includeIgnored: true only when you intentionally need .gitignored files such as node_modules, build output, or generated artifacts.",
       "Use for paths, not content. Use grep for content.",
       "For exact path matches use a glob in `path` — e.g. path: '**/profile.h' for exact filename, or path: 'src/**/profile.h' scoped to a subtree. Bare patterns are fuzzy.",
       "To list everything inside a directory, pass path: 'dir/**' with an empty or wildcard pattern instead of using pattern alone.",
@@ -981,12 +1044,16 @@ export default function fffExtension(pi: ExtensionAPI) {
         throw new Error(pathLikePatternMessage(pattern));
       }
       const pageIndex = resumed?.nextPageIndex ?? 0;
+      const includeIgnored = resumed?.includeIgnored ?? params.includeIgnored === true;
 
-      const searchResult = await withFinderLease(basePath, (finder) =>
-        finder.fileSearch(query, {
-          pageIndex,
-          pageSize: effectiveLimit,
-        }),
+      const searchResult = await withFinderLease(
+        basePath,
+        (finder) =>
+          finder.fileSearch(query, {
+            pageIndex,
+            pageSize: effectiveLimit,
+          }),
+        includeIgnored,
       );
       if (!searchResult.ok) throw new Error(searchResult.error);
 
@@ -998,11 +1065,14 @@ export default function fffExtension(pi: ExtensionAPI) {
           params.exclude,
           basePath,
         );
-        const fallback = await withFinderLease(basePath, (finder) =>
-          finder.fileSearch(scopedQuery, {
-            pageIndex: 0,
-            pageSize: Math.max(effectiveLimit, 500),
-          }),
+        const fallback = await withFinderLease(
+          basePath,
+          (finder) =>
+            finder.fileSearch(scopedQuery, {
+              pageIndex: 0,
+              pageSize: Math.max(effectiveLimit, 500),
+            }),
+          includeIgnored,
         );
         if (fallback.ok) {
           const needle = pattern.trim().toLowerCase();
@@ -1020,7 +1090,10 @@ export default function fffExtension(pi: ExtensionAPI) {
           }
         }
       }
-      if (result.items.length === 0) throw new Error("No files found matching pattern");
+      if (result.items.length === 0)
+        throw new Error(
+          await noResultsMessage("No files found matching pattern", basePath, params.path, includeIgnored),
+        );
 
       const formatted = formatFindOutput(result, effectiveLimit, pattern);
       let output = formatted.output;
@@ -1049,9 +1122,11 @@ export default function fffExtension(pi: ExtensionAPI) {
           pattern,
           pageSize: effectiveLimit,
           nextPageIndex: pageIndex + 1,
+          includeIgnored,
         });
         notices.push(`${remaining} more. Next page: find cursor="${cursorId}"`);
       }
+      if (includeIgnored) notices.unshift("ignored files included");
 
       if (notices.length > 0) output += `\n\n[${notices.join(". ")}]`;
       return {
@@ -1134,7 +1209,7 @@ export default function fffExtension(pi: ExtensionAPI) {
             constraints: params.constraints,
             maxMatchesPerFile: Math.min(effectiveLimit, 50),
             smartCase: true,
-            cursor: (params.cursor ? getCursor(params.cursor) : null) ?? null,
+            cursor: (params.cursor ? getCursor(params.cursor)?.cursor : null) ?? null,
             beforeContext: params.context ?? 0,
             afterContext: params.context ?? 0,
           }),

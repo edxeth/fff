@@ -85,8 +85,8 @@ Env vars: `PI_FFF_MODE`, `FFF_FRECENCY_DB`, `FFF_HISTORY_DB`. Flags: `--fff-mode
 
 ### Agent-facing tools
 
-- `ffgrep`. Content search. Accepts `path`, `exclude` (comma, space, or array; leading `!` optional), `caseSensitive`, `context`, and cursor pagination. Auto-detects regex, falls back to fuzzy on zero exact matches, rejects `.*`-style wildcard-only patterns up front.
-- `fffind`. Path and filename search. Matches the whole repo-relative path, not just the filename. Frecency-aware. The weak-match detector flags scattered fuzzy noise before it floods the agent's context.
+- `ffgrep`. Content search. Accepts `path`, `exclude` (comma, space, or array; leading `!` optional), `includeIgnored`, `caseSensitive`, `context`, and cursor pagination. Auto-detects regex, falls back to fuzzy on zero exact matches, rejects `.*`-style wildcard-only patterns up front.
+- `fffind`. Path and filename search. Accepts `includeIgnored` for intentionally searching `.gitignore`/`.ignore` matches such as dependencies or build output. Matches the whole repo-relative path, not just the filename. Frecency-aware. The weak-match detector flags scattered fuzzy noise before it floods the agent's context.
 
 ### Commands
 

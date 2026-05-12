@@ -86,6 +86,7 @@ Search file contents. Smart case, plain text by default, regex optional.
 Parameters:
 - `pattern` — search text or regex
 - `path` — directory/file constraint (e.g. `src/`, `*.ts`)
+- `includeIgnored` — include files matched by `.gitignore`, `.ignore`, git excludes, or global gitignore when intentionally inspecting ignored paths
 - `ignoreCase` — force case-insensitive
 - `literal` — treat as literal string (default: true)
 - `context` — context lines around matches
@@ -99,6 +100,7 @@ Fuzzy file name search. Frecency-ranked.
 Parameters:
 - `pattern` — fuzzy query (e.g. `main.ts`, `src/ config`)
 - `path` — directory constraint
+- `includeIgnored` — include files matched by `.gitignore`, `.ignore`, git excludes, or global gitignore when intentionally inspecting ignored paths
 - `limit` — max results (default: 200)
 
 ### `fff-multi-grep`

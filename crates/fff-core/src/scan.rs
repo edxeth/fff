@@ -64,6 +64,7 @@ pub(crate) struct ScanConfig {
     pub(crate) watch: bool,
     pub(crate) auto_cache_budget: bool,
     pub(crate) install_watcher: bool,
+    pub(crate) include_ignored: bool,
 }
 
 /// A fully-configured scan job ready to run on a background thread.
@@ -112,6 +113,7 @@ impl ScanJob {
             watch: picker.has_watcher(),
             auto_cache_budget: !picker.has_explicit_cache_budget(),
             install_watcher: false, // the watcher is independent of rescan, it is not restarting EVER
+            include_ignored: picker.include_ignored,
         };
 
         drop(guard); // just a sanity check
@@ -182,6 +184,7 @@ impl ScanJob {
             &scanned_files_counter,
             &shared_frecency,
             mode,
+            config.include_ignored,
         ) {
             Ok(sync) => sync,
             Err(e) => {
@@ -235,6 +238,7 @@ impl ScanJob {
                 shared_picker.clone(),
                 shared_frecency.clone(),
                 mode,
+                config.include_ignored,
             ) {
                 Ok(watcher) => {
                     if let Ok(mut guard) = shared_picker.write()

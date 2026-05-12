@@ -414,6 +414,29 @@ struct FffResult *fff_create_instance2(const char *base_path,
                                        uint64_t cache_budget_max_file_size);
 
 /**
+ * Create a new file finder instance (v3, with ignored-file indexing control).
+ *
+ * Same as `fff_create_instance2`, plus `include_ignored` to include files matched by ignore rules.
+ *
+ * ## Safety
+ * String parameters must be valid null-terminated UTF-8 or NULL.
+ */
+struct FffResult *fff_create_instance3(const char *base_path,
+                                       const char *frecency_db_path,
+                                       const char *history_db_path,
+                                       bool _use_unsafe_no_lock,
+                                       bool enable_mmap_cache,
+                                       bool enable_content_indexing,
+                                       bool watch,
+                                       bool ai_mode,
+                                       const char *log_file_path,
+                                       const char *log_level,
+                                       uint64_t cache_budget_max_files,
+                                       uint64_t cache_budget_max_bytes,
+                                       uint64_t cache_budget_max_file_size,
+                                       bool include_ignored);
+
+/**
  * Destroy a file finder instance and free all its resources.
  *
  * ## Safety
@@ -601,6 +624,15 @@ bool fff_is_scanning(void *fff_handle);
  * `fff_handle` must be a valid instance pointer from `fff_create_instance`.
  */
 struct FffResult *fff_get_base_path(void *fff_handle);
+
+/**
+ * Check whether a path is excluded by the current scanner ignore rules.
+ *
+ * ## Safety
+ * `fff_handle` must be a valid instance pointer from `fff_create_instance`.
+ * `path` must be a valid null-terminated UTF-8 string or NULL.
+ */
+struct FffResult *fff_is_path_ignored(void *fff_handle, const char *path);
 
 /**
  * Get scan progress information.

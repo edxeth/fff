@@ -195,6 +195,49 @@ pub unsafe extern "C" fn fff_create_instance2(
     cache_budget_max_bytes: u64,
     cache_budget_max_file_size: u64,
 ) -> *mut FffResult {
+    unsafe {
+        fff_create_instance3(
+            base_path,
+            frecency_db_path,
+            history_db_path,
+            false,
+            enable_mmap_cache,
+            enable_content_indexing,
+            watch,
+            ai_mode,
+            log_file_path,
+            log_level,
+            cache_budget_max_files,
+            cache_budget_max_bytes,
+            cache_budget_max_file_size,
+            false,
+        )
+    }
+}
+
+/// Create a new file finder instance (v3, with ignored-file indexing control).
+///
+/// Same as `fff_create_instance2`, plus `include_ignored` to include files matched by ignore rules.
+///
+/// ## Safety
+/// String parameters must be valid null-terminated UTF-8 or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_create_instance3(
+    base_path: *const c_char,
+    frecency_db_path: *const c_char,
+    history_db_path: *const c_char,
+    _use_unsafe_no_lock: bool,
+    enable_mmap_cache: bool,
+    enable_content_indexing: bool,
+    watch: bool,
+    ai_mode: bool,
+    log_file_path: *const c_char,
+    log_level: *const c_char,
+    cache_budget_max_files: u64,
+    cache_budget_max_bytes: u64,
+    cache_budget_max_file_size: u64,
+    include_ignored: bool,
+) -> *mut FffResult {
     let base_path_str = match unsafe { cstr_to_str(base_path) } {
         Some(s) if !s.is_empty() => s.to_string(),
         _ => return FffResult::err("base_path is null or empty"),
@@ -271,6 +314,7 @@ pub unsafe extern "C" fn fff_create_instance2(
             watch,
             mode,
             cache_budget,
+            include_ignored,
         },
     ) {
         return FffResult::err(&format!("Failed to init file picker: {}", e));
@@ -804,6 +848,35 @@ pub unsafe extern "C" fn fff_get_base_path(fff_handle: *mut c_void) -> *mut FffR
     FffResult::ok_string(&picker.base_path().to_string_lossy())
 }
 
+/// Check whether a path is excluded by the current scanner ignore rules.
+///
+/// ## Safety
+/// `fff_handle` must be a valid instance pointer from `fff_create_instance`.
+/// `path` must be a valid null-terminated UTF-8 string or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fff_is_path_ignored(
+    fff_handle: *mut c_void,
+    path: *const c_char,
+) -> *mut FffResult {
+    let inst = match unsafe { instance_ref(fff_handle) } {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    let path = unsafe { optional_cstr(path) }.unwrap_or("");
+
+    let guard = match inst.picker.read() {
+        Ok(g) => g,
+        Err(e) => return FffResult::err(&format!("Failed to acquire file picker lock: {}", e)),
+    };
+
+    let picker = match guard.as_ref() {
+        Some(p) => p,
+        None => return FffResult::err("File picker not initialized"),
+    };
+
+    FffResult::ok_int(i64::from(picker.is_path_ignored(path)))
+}
+
 /// Get scan progress information.
 ///
 /// ## Safety
@@ -902,19 +975,27 @@ pub unsafe extern "C" fn fff_restart_index(
         Err(e) => return FffResult::err(&format!("Failed to acquire file picker lock: {}", e)),
     };
 
-    let (warmup_caches, content_indexing, watch, mode) = if let Some(mut picker) = guard.take() {
-        let warmup = picker.has_mmap_cache();
-        let enable_content_indexing = picker.has_content_indexing();
-        let watch = picker.has_watcher();
-        let mode = picker.mode();
+    let (warmup_caches, content_indexing, watch, mode, include_ignored) =
+        if let Some(mut picker) = guard.take() {
+            let warmup = picker.has_mmap_cache();
+            let enable_content_indexing = picker.has_content_indexing();
+            let watch = picker.has_watcher();
+            let mode = picker.mode();
+            let include_ignored = picker.includes_ignored();
 
-        picker.stop_background_monitor();
+            picker.stop_background_monitor();
 
-        (warmup, enable_content_indexing, watch, mode)
-    } else {
-        // this is error state anyway
-        (false, true, true, FFFMode::default())
-    };
+            (
+                warmup,
+                enable_content_indexing,
+                watch,
+                mode,
+                include_ignored,
+            )
+        } else {
+            // this is error state anyway
+            (false, true, true, FFFMode::default(), false)
+        };
 
     drop(guard);
 
@@ -928,6 +1009,7 @@ pub unsafe extern "C" fn fff_restart_index(
             watch,
             mode,
             cache_budget: None,
+            include_ignored,
         },
     ) {
         Ok(()) => FffResult::ok_empty(),

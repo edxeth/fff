@@ -51,6 +51,8 @@ export interface InitOptions {
   disableWatch?: boolean;
   /** enables optimizations for AI agent assistants. Provide as true if running via mcp/agent */
   aiMode?: boolean;
+  /** Include files matched by .gitignore, .ignore, git excludes, and global gitignore. */
+  includeIgnored?: boolean;
   /**
    * Path to the tracing log file. When set, the shared FFF tracing subscriber
    * is installed on first init and file output is written here. Omit to leave
