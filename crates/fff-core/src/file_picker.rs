@@ -2193,7 +2193,7 @@ fn common_dir_prefix_len(a: &str, b: &str) -> usize {
 
 fn concrete_prefix_path(base_path: &Path, path: &str) -> PathBuf {
     let glob_start = path
-        .find(|c| matches!(c, '*' | '?' | '[' | '{'))
+        .find(['*', '?', '[', '{'])
         .unwrap_or(path.len());
     let prefix = path[..glob_start].trim_end_matches(['/', '\\']);
     let raw = if prefix.is_empty() { path } else { prefix };

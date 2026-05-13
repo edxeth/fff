@@ -24,6 +24,14 @@ pub struct BackgroundWatcher {
     owner_thread: Option<std::thread::JoinHandle<()>>,
 }
 
+struct DebouncerConfig {
+    base_path: PathBuf,
+    git_workdir: Option<PathBuf>,
+    mode: FFFMode,
+    include_ignored: bool,
+    use_recursive: bool,
+}
+
 const DEBOUNCE_TIMEOUT: Duration = Duration::from_millis(50);
 const MAX_PATHS_THRESHOLD: usize = 1024;
 /// On macOS, each `watch()` call creates a separate FSEventStream. When the
@@ -86,14 +94,17 @@ impl BackgroundWatcher {
         let owner_frecency = shared_frecency.clone();
         let owner_git_workdir = git_workdir.clone();
 
-        let debouncer = Self::create_debouncer(
+        let config = DebouncerConfig {
             base_path,
             git_workdir,
-            shared_picker,
-            shared_frecency,
             mode,
             include_ignored,
             use_recursive,
+        };
+        let debouncer = Self::create_debouncer(
+            config,
+            shared_picker,
+            shared_frecency,
             watch_tx_for_debouncer,
         )?;
 
@@ -166,13 +177,9 @@ impl BackgroundWatcher {
     }
 
     fn create_debouncer(
-        base_path: PathBuf,
-        git_workdir: Option<PathBuf>,
+        cfg: DebouncerConfig,
         shared_picker: SharedFilePicker,
         shared_frecency: SharedFrecency,
-        mode: FFFMode,
-        include_ignored: bool,
-        use_recursive: bool,
         watch_tx: mpsc::Sender<PathBuf>,
     ) -> Result<Debouncer, Error> {
         let config = Config::default()
@@ -193,7 +200,7 @@ impl BackgroundWatcher {
         // `SharedFilePicker` here would re-introduce the Arc cycle
         // we just broke with `owner_picker`'s `downgrade()` above.
         // Capture a weak handle instead and upgrade per-batch.
-        let git_workdir_for_handler = git_workdir.clone();
+        let git_workdir_for_handler = cfg.git_workdir.clone();
         let shared_picker_for_watching = shared_picker.clone();
         let event_picker = shared_picker.weaken();
         let mut debouncer = new_debouncer_opt(
@@ -215,8 +222,8 @@ impl BackgroundWatcher {
                             &git_workdir_for_handler,
                             &strong_picker,
                             &shared_frecency,
-                            mode,
-                            include_ignored,
+                            cfg.mode,
+                            cfg.include_ignored,
                         );
 
                         // every new directory creates had to be reflected in the picker state
@@ -261,16 +268,16 @@ impl BackgroundWatcher {
         // New directories created at runtime are detected via Create events on
         // the parent and dynamically added by the owner thread via watch_tx.
 
-        if use_recursive {
-            debouncer.watch(base_path.as_path(), RecursiveMode::Recursive)?;
+        if cfg.use_recursive {
+            debouncer.watch(cfg.base_path.as_path(), RecursiveMode::Recursive)?;
             info!(
                 "File watcher initialized with single recursive watch on {} \
                  (exceeded threshold of {})",
-                base_path.display(),
+                cfg.base_path.display(),
                 MAX_MACOS_NONRECURSIVE_WATCHES,
             );
         } else {
-            debouncer.watch(base_path.as_path(), RecursiveMode::NonRecursive)?;
+            debouncer.watch(cfg.base_path.as_path(), RecursiveMode::NonRecursive)?;
 
             // Stream watch-dir registration directly under the picker
             // read lock. Only Linux (inotify) reaches this branch —
@@ -327,7 +334,7 @@ impl BackgroundWatcher {
             info!(
                 "File watcher initialized for {} directories (NonRecursive) under {} (aborted_early={})",
                 watched,
-                base_path.display(),
+                cfg.base_path.display(),
                 aborted_early,
             );
         }
@@ -339,7 +346,7 @@ impl BackgroundWatcher {
         // but these targeted watches are cheap (at most 3 extra streams)
         // and ensure we catch status changes even if the recursive backend
         // coalesces or delays .git events.
-        watch_git_status_paths(&mut debouncer, git_workdir.as_ref());
+        watch_git_status_paths(&mut debouncer, cfg.git_workdir.as_ref());
 
         Ok(debouncer)
     }
