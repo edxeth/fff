@@ -1131,6 +1131,70 @@ export default function fffExtension(pi: ExtensionAPI) {
           }
         }
       }
+
+      let regexFallbackUsed = false;
+      let regexFallbackAlts: string[] = [];
+
+      // Regex alternation recovery: models commonly write "foo|bar" expecting OR,
+      // but FFF fuzzy treats | as a literal character that no file path contains.
+      // When | is present, search each alternative independently and merge results,
+      // preserving true OR semantics instead of raw fuzzy matching.
+      if (!params.cursor && !resumed && pattern.includes("|")) {
+        const alternatives = pattern
+          .split("|")
+          .map((s) => s.trim().replace(/[()]/g, ""))
+          .filter(Boolean);
+        regexFallbackAlts = alternatives;
+        if (alternatives.length > 1) {
+          const seen = new Set<string>();
+          const merged: Array<{
+            relativePath: string;
+            fileName?: string;
+            gitStatus?: string;
+            totalFrecencyScore?: number;
+            accessFrecencyScore?: number;
+            [key: string]: unknown;
+          }> = [];
+          for (const alt of alternatives) {
+            const altQuery = buildQuery(
+              resolvedBase.pathConstraint,
+              alt,
+              params.exclude,
+              basePath,
+            );
+            const altResult = await withFinderLease(
+              basePath,
+              (finder) =>
+                finder.fileSearch(altQuery, {
+                  pageIndex: 0,
+                  pageSize: effectiveLimit,
+                }),
+              includeIgnored,
+            );
+            if (altResult.ok) {
+              for (const item of altResult.value.items) {
+                if (!seen.has(item.relativePath)) {
+                  seen.add(item.relativePath);
+                  merged.push(item);
+                }
+              }
+            }
+          }
+          if (merged.length > 0) {
+            result = {
+              items: merged,
+              totalMatched: merged.length,
+            } as typeof result;
+            // Scores from different alternative searches aren't cross-comparable,
+            // so fabricate above-threshold scores to avoid weak-match capping.
+            (result as Record<string, unknown>).scores = merged.map(() => ({
+              total: weakScoreThreshold(pattern) + 1,
+            }));
+            regexFallbackUsed = true;
+          }
+        }
+      }
+
       if (result.items.length === 0)
         throw new Error(
           await noResultsMessage("No files found matching pattern", basePath, params.path, includeIgnored),
@@ -1155,7 +1219,7 @@ export default function fffExtension(pi: ExtensionAPI) {
       if (formatted.literalTailSuppressed && hiddenFuzzyMatches >= 1000)
         notices.push(`${formatted.shownCount} exact matches shown. Fuzzy tail hidden`);
 
-      if (!formatted.weak && !formatted.literalTailSuppressed && hasMore) {
+      if (!formatted.weak && !formatted.literalTailSuppressed && hasMore && !regexFallbackUsed) {
         const remaining = result.totalMatched - shownSoFar;
         const cursorId = storeFindCursor({
           basePath,
@@ -1166,6 +1230,9 @@ export default function fffExtension(pi: ExtensionAPI) {
           includeIgnored,
         });
         notices.push(`${remaining} more. Next page: find cursor="${cursorId}"`);
+      }
+      if (regexFallbackUsed) {
+        notices.push(`Regex alternation (|) in pattern treated as ${regexFallbackAlts.length} searches: ${regexFallbackAlts.map((s) => `"${s}"`).join(", ")}`);
       }
       if (includeIgnored) notices.unshift("ignored files included");
 
