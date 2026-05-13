@@ -25,7 +25,7 @@ import type {
   SearchResult,
 } from "@edxeth/fff-node";
 import { FileFinder } from "@edxeth/fff-node";
-import { buildQuery } from "./query";
+import { buildQuery, normalizeExcludes } from "./query";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -550,11 +550,14 @@ export default function fffExtension(pi: ExtensionAPI) {
     const promise = (async () => {
       trimFinderCache();
       const useDatabases = basePath === activeCwd && !includeIgnored;
+      const isWorkspace = basePath === activeCwd;
       const result = FileFinder.create({
         basePath,
         frecencyDbPath: useDatabases ? frecencyDbPath : undefined,
         historyDbPath: useDatabases ? historyDbPath : undefined,
-        aiMode: true,
+        aiMode: isWorkspace,
+        disableContentIndexing: !isWorkspace,
+        disableMmapCache: !isWorkspace,
         includeIgnored,
       } as FffInitOptions);
 
@@ -834,13 +837,13 @@ export default function fffExtension(pi: ExtensionAPI) {
     description: `Grep file contents. Smart-case, auto-detects regex vs literal, git-aware. Results are ranked by frecency (most-accessed files first); matches within a file stay in source order. Default limit ${DEFAULT_GREP_LIMIT}.`,
     promptSnippet: "Grep contents",
     promptGuidelines: [
-      "Prefer bare identifiers as patterns. Literal queries are most efficient.",
-      "Use path for include ('src/', '*.ts') and exclude for noise ('test/,*.min.js').",
-      "Use includeIgnored: true only when you intentionally need .gitignored files such as node_modules, build output, or generated artifacts.",
-      "caseSensitive: true when you need exact case (smart-case otherwise).",
-      "Never combine paths in one call. For multiple files, make separate grep calls.",
-      "After 1-2 greps, read the top match instead of more greps.",
-      "When you need OR-logic across multiple patterns (e.g., naming variants like validate_input, ValidateInput, validateInput), use multi_grep with a patterns array instead of sequential grep calls.",
+      "Use for content, not paths.",
+      "Use one literal identifier or phrase first; regex only when needed.",
+      "Use path for one scope and exclude for noise, e.g. path: 'src/', exclude: 'test/,*.min.js'.",
+      "Set includeIgnored only when intentionally searching ignored files such as node_modules or build output.",
+      "Set caseSensitive: true only when exact case matters; otherwise smart-case applies.",
+      "Use multi_grep for 2-6 literal identifiers or naming variants; grep regex alternation is OK for a simple 2-way OR.",
+      "After 1-2 greps, read the best match instead of widening search.",
     ],
     parameters: grepSchema,
 
@@ -1040,14 +1043,14 @@ export default function fffExtension(pi: ExtensionAPI) {
     description: `Fuzzy path search and glob search. Matches against the whole repo-relative path, not just the filename. Frecency-ranked, git-aware. Multi-word = narrower (AND). Default limit ${DEFAULT_FIND_LIMIT}.`,
     promptSnippet: "Find files by path or glob",
     promptGuidelines: [
-      "Matches the WHOLE path, not just the filename — `profile` hits `chrome/browser/profiles/x.cc` too.",
-      "Keep queries to 1-2 terms; extra words narrow.",
-      "Use one path constraint only: one file, directory, or glob.",
-      "Use includeIgnored: true only when you intentionally need .gitignored files such as node_modules, build output, or generated artifacts.",
-      "Use for paths, not content. Use grep for content.",
-      "For exact path matches use a glob in `path` — e.g. path: '**/profile.h' for exact filename, or path: 'src/**/profile.h' scoped to a subtree. Bare patterns are fuzzy.",
-      "To list everything inside a directory, pass path: 'dir/**' with an empty or wildcard pattern instead of using pattern alone.",
-      "Use exclude: 'test/,*.min.js' to cut noise in large repos.",
+      "Use for paths, not content; use grep for content.",
+      "Pattern is fuzzy over the whole repo-relative path, not just the basename.",
+      "Keep pattern to 1-2 terms; extra words narrow results.",
+      "Put exact paths, directories, and globs in path, not pattern, e.g. path: '**/profile.h'.",
+      "Use only one path constraint: one file, directory, or glob.",
+      "For directory contents, use path: 'dir/**' with pattern: '' or '*'.",
+      "Use exclude to cut noise, e.g. 'test/,*.min.js'.",
+      "Set includeIgnored only when intentionally searching ignored files such as node_modules or build output.",
     ],
     parameters: findSchema,
 
@@ -1208,15 +1211,29 @@ export default function fffExtension(pi: ExtensionAPI) {
       patterns: Type.Array(Type.String(), {
         description:
           "Literal patterns (OR). Include snake_case/camelCase/PascalCase variants.",
+        minItems: 1,
+        maxItems: 20,
       }),
-      constraints: Type.Optional(
-        Type.String({ description: "File filter, e.g. '*.{ts,tsx} !test/'" }),
+      path: Type.Optional(
+        Type.String({
+          description:
+            "Single path constraint: one file, one directory, or one glob. Do not pass multiple paths. Applied to the full repo-relative path.",
+        }),
+      ),
+      exclude: Type.Optional(
+        Type.Union([Type.String(), Type.Array(Type.String())], {
+          description:
+            "Exclude paths (comma/space-separated or array). Same syntax as path: directory prefix ('test/'), filename with extension ('config.json'), or glob ('*.min.js', '**/*.{rs,go}'). A leading '!' is optional and ignored. Example: 'test/,*.min.js,!vendor/'.",
+        }),
       ),
       includeIgnored: Type.Optional(
         Type.Boolean({
           description:
             "Include files matched by .gitignore, .ignore, git excludes, and global gitignore. Default false. Use when the target file or directory exists but normal search cannot see it because it is ignored, such as node_modules or build output.",
         }),
+      ),
+      constraints: Type.Optional(
+        Type.String({ description: "File filter, e.g. '*.{ts,tsx} !test/'" }),
       ),
       context: Type.Optional(Type.Number({ description: "Context lines before+after" })),
       limit: Type.Optional(
@@ -1231,13 +1248,15 @@ export default function fffExtension(pi: ExtensionAPI) {
       name: toolNames.multiGrep,
       label: toolNames.multiGrep,
       description:
-        "Search file contents for ANY of multiple literal patterns (OR, SIMD Aho-Corasick). Faster than regex alternation.",
+        "Search file contents for ANY of multiple literal patterns (OR logic). Faster than regex alternation for literal text.",
       promptSnippet: "Multi-pattern OR content search",
       promptGuidelines: [
-        "Use when searching for several identifiers at once.",
-        "Include naming variants (snake/camel/Pascal) — but limit to 2-6 specific patterns that actually appear in the codebase. The tool caps at 20 patterns.",
-        "Use includeIgnored: true only when you intentionally need .gitignored files such as node_modules, build output, or generated artifacts.",
-        "Patterns are literal. Use constraints for file filters.",
+        "Use for content searches with 2-6 literal identifiers or naming variants.",
+        "Patterns are ORed literals, not regexes or globs.",
+        "Do not use for broad concepts or unrelated keywords; run separate searches instead.",
+        "Use constraints for file filters, e.g. '*.{ts,tsx} !test/'.",
+        "Output tags each match with the pattern index.",
+        "Set includeIgnored only when intentionally searching ignored files such as node_modules or build output.",
       ],
       parameters: multiGrepSchema,
 
@@ -1245,20 +1264,34 @@ export default function fffExtension(pi: ExtensionAPI) {
         if (signal?.aborted) throw new Error("Operation aborted");
         if (!params.patterns?.length)
           throw new Error("patterns array must have at least 1 element");
+        if (params.path && pathLooksLikeMultiplePaths(params.path)) {
+          throw new Error(
+            "Path appears to contain multiple entries — multi_grep accepts a single path. Use separate calls or a glob pattern.",
+          );
+        }
+        const invalidPath = params.path ? invalidPathMessage(params.path) : null;
+        if (invalidPath) throw new Error(invalidPath);
 
         const effectiveLimit = Math.max(1, params.limit ?? DEFAULT_GREP_LIMIT);
-        const storedCursor = params.cursor ? getCursor(params.cursor) : undefined;
-        const includeIgnored = storedCursor?.includeIgnored ?? params.includeIgnored === true;
+        const searchBase = resolveSearchBase(params.path);
+        const includeIgnored = params.includeIgnored === true;
+
+        // Build combined constraints from pathConstraint + exclude + explicit constraints
+        const constraintParts: string[] = [];
+        if (searchBase.pathConstraint) constraintParts.push(searchBase.pathConstraint);
+        constraintParts.push(...normalizeExcludes(params.exclude, searchBase.basePath));
+        if (params.constraints) constraintParts.push(params.constraints);
+        const effectiveConstraints = constraintParts.join(" ");
 
         const grepResult = await withFinderLease(
-          activeCwd,
+          searchBase.basePath,
           (finder) =>
             finder.multiGrep({
               patterns: params.patterns,
-              constraints: params.constraints,
+              constraints: effectiveConstraints,
               maxMatchesPerFile: Math.min(effectiveLimit, 50),
               smartCase: true,
-              cursor: storedCursor?.cursor ?? null,
+              cursor: (params.cursor ? getCursor(params.cursor)?.cursor : null) ?? null,
               beforeContext: params.context ?? 0,
               afterContext: params.context ?? 0,
               classifyDefinitions: true,
