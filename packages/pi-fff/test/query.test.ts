@@ -1,7 +1,18 @@
-import { describe, expect, test } from "bun:test";
-import { buildQuery, normalizePathConstraint } from "../src/query";
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdirSync, rmSync } from "node:fs";
+import {
+  buildQuery,
+  concretePathForConstraint,
+  normalizePathConstraint,
+  pathLooksLikeMultiplePaths,
+} from "../src/query";
 
 const cwd = "/tmp/workspace";
+const spacedDir = "/tmp/workspace/Code Forge";
+
+afterEach(() => {
+  rmSync(spacedDir, { recursive: true, force: true });
+});
 
 describe("path constraint normalization", () => {
   test("converts absolute in-workspace paths to repo-relative constraints", () => {
@@ -61,5 +72,19 @@ describe("path constraint normalization", () => {
 
   test("converts absolute in-workspace glob path to repo-relative glob", () => {
     expect(normalizePathConstraint("/tmp/workspace/src/**/*.ts", cwd)).toBe("src/**/*.ts");
+  });
+
+  test("treats a path with spaces as a single concrete workspace path", () => {
+    mkdirSync(spacedDir, { recursive: true });
+    expect(pathLooksLikeMultiplePaths("/tmp/workspace/Code Forge/**", cwd)).toBe(false);
+    expect(pathLooksLikeMultiplePaths("Code Forge/**", cwd)).toBe(false);
+    expect(concretePathForConstraint("/tmp/workspace/Code Forge/**", cwd)).toBe(
+      "/tmp/workspace/Code Forge",
+    );
+  });
+
+  test("still flags obvious multi-path input", () => {
+    expect(pathLooksLikeMultiplePaths("src/one tests/two", cwd)).toBe(true);
+    expect(pathLooksLikeMultiplePaths("tests/one src/two", cwd)).toBe(true);
   });
 });

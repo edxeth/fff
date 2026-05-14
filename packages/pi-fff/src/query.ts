@@ -1,4 +1,29 @@
+import fs from "node:fs";
 import path from "node:path";
+
+export function concretePathForConstraint(
+  pathConstraint: string,
+  cwd = process.cwd(),
+): string {
+  const absolute = path.isAbsolute(pathConstraint)
+    ? pathConstraint
+    : path.resolve(cwd, pathConstraint);
+  const wildcard = absolute.search(/[*?[{]/);
+  const concrete = wildcard === -1 ? absolute : absolute.slice(0, wildcard);
+  if (wildcard === -1) return absolute;
+  return concrete.endsWith(path.sep) ? concrete.slice(0, -1) : path.dirname(concrete);
+}
+
+export function pathLooksLikeMultiplePaths(
+  pathConstraint: string,
+  cwd = process.cwd(),
+): boolean {
+  if (fs.existsSync(concretePathForConstraint(pathConstraint, cwd))) return false;
+
+  const parts = pathConstraint.trim().split(/\s+/).filter(Boolean);
+  if (parts.length < 2) return false;
+  return parts.every((part) => part.includes("/") || part.includes("\\"));
+}
 
 export function normalizePathConstraint(
   pathConstraint: string,

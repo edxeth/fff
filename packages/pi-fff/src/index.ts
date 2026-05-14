@@ -25,7 +25,11 @@ import type {
   SearchResult,
 } from "@edxeth/fff-node";
 import { FileFinder } from "@edxeth/fff-node";
-import { buildQuery, normalizeExcludes } from "./query";
+import {
+  buildQuery,
+  normalizeExcludes,
+  pathLooksLikeMultiplePaths,
+} from "./query";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -272,12 +276,6 @@ function patternLooksLikePath(pattern: string): boolean {
 
 function pathLikePatternMessage(_pattern: string): string {
   return "Path/glob belongs in path, not pattern";
-}
-
-function pathLooksLikeMultiplePaths(pathConstraint: string): boolean {
-  const parts = pathConstraint.trim().split(/\s+/).filter(Boolean);
-  if (parts.length < 2) return false;
-  return parts.every((part) => part.includes("/") || part.includes("\\"));
 }
 
 function multiplePathsMessage(): string {
@@ -850,7 +848,7 @@ export default function fffExtension(pi: ExtensionAPI) {
     async execute(_toolCallId, params, signal) {
       if (signal?.aborted) throw new Error("Operation aborted");
 
-      if (params.path && pathLooksLikeMultiplePaths(params.path)) {
+      if (params.path && pathLooksLikeMultiplePaths(params.path, activeCwd)) {
         throw new Error(multiplePathsMessage());
       }
       const invalidPath = params.path ? invalidPathMessage(params.path) : null;
@@ -1060,7 +1058,7 @@ export default function fffExtension(pi: ExtensionAPI) {
       // Resume from a prior cursor if supplied — cursor owns basePath+query+pageSize
       // so the agent can't accidentally mix patterns across pages.
       const resumed = params.cursor ? getFindCursor(params.cursor) : undefined;
-      if (!params.cursor && params.path && pathLooksLikeMultiplePaths(params.path)) {
+      if (!params.cursor && params.path && pathLooksLikeMultiplePaths(params.path, activeCwd)) {
         throw new Error(multiplePathsMessage());
       }
       const invalidPath =
