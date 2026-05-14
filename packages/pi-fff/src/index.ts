@@ -19,9 +19,11 @@ import { Type } from "@sinclair/typebox";
 import type {
   GrepCursor,
   GrepMode,
+  FileItem,
   GrepResult,
   InitOptions,
   MixedItem,
+  Score,
   SearchResult,
 } from "@edxeth/fff-node";
 import { FileFinder } from "@edxeth/fff-node";
@@ -151,15 +153,6 @@ export function fffFileAnnotation(item: {
   if (frecency >= WARM_FRECENCY) return "  [often touched file]";
 
   return "";
-}
-
-/** Compact label for a single pattern index range. */
-function formatPatternLabel(indices: Set<number>): string {
-  if (indices.size === 0) return "";
-  if (indices.size === 1) return ` [${[...indices][0]}]`;
-  // Show sorted compact range
-  const sorted = [...indices].sort((a, b) => a - b);
-  return ` [${sorted.join(",")}]`;
 }
 
 // fff-core native definition classifier (byte-level scanner in Rust) is enabled
@@ -555,7 +548,7 @@ export default function fffExtension(pi: ExtensionAPI) {
         basePath,
         frecencyDbPath: useDatabases ? frecencyDbPath : undefined,
         historyDbPath: useDatabases ? historyDbPath : undefined,
-        aiMode: isWorkspace,
+        aiMode: true,
         disableContentIndexing: !isWorkspace,
         disableMmapCache: !isWorkspace,
         includeIgnored,
@@ -1147,14 +1140,8 @@ export default function fffExtension(pi: ExtensionAPI) {
         regexFallbackAlts = alternatives;
         if (alternatives.length > 1) {
           const seen = new Set<string>();
-          const merged: Array<{
-            relativePath: string;
-            fileName?: string;
-            gitStatus?: string;
-            totalFrecencyScore?: number;
-            accessFrecencyScore?: number;
-            [key: string]: unknown;
-          }> = [];
+          const merged: FileItem[] = [];
+          let totalFiles = 0;
           for (const alt of alternatives) {
             const altQuery = buildQuery(
               resolvedBase.pathConstraint,
@@ -1172,6 +1159,7 @@ export default function fffExtension(pi: ExtensionAPI) {
               includeIgnored,
             );
             if (altResult.ok) {
+              totalFiles = Math.max(totalFiles, altResult.value.totalFiles);
               for (const item of altResult.value.items) {
                 if (!seen.has(item.relativePath)) {
                   seen.add(item.relativePath);
@@ -1181,15 +1169,25 @@ export default function fffExtension(pi: ExtensionAPI) {
             }
           }
           if (merged.length > 0) {
+            const total = weakScoreThreshold(pattern) + 1;
+            const scores: Score[] = merged.map(() => ({
+              total,
+              baseScore: total,
+              filenameBonus: 0,
+              specialFilenameBonus: 0,
+              frecencyBoost: 0,
+              distancePenalty: 0,
+              currentFilePenalty: 0,
+              comboMatchBoost: 0,
+              exactMatch: false,
+              matchType: "alternation",
+            }));
             result = {
               items: merged,
+              scores,
               totalMatched: merged.length,
-            } as typeof result;
-            // Scores from different alternative searches aren't cross-comparable,
-            // so fabricate above-threshold scores to avoid weak-match capping.
-            (result as Record<string, unknown>).scores = merged.map(() => ({
-              total: weakScoreThreshold(pattern) + 1,
-            }));
+              totalFiles,
+            };
             regexFallbackUsed = true;
           }
         }
