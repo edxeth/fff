@@ -15,7 +15,6 @@ fff-query-parser = { version = "0.7.2", path = "crates/fff-query-parser", defaul
 
 # Shared dependencies
 ahash = "0.8"
-bindet = "0.3"
 blake3 = "1.8.2"
 chrono = { version = "0.4", features = ["serde"] }
 ctrlc = "3.4.2"

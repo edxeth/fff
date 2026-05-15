@@ -140,12 +140,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bindet"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5afee99ef5f7527f3944f2bf4f5d443749fa47d43eb1d4f83a36e839be7900a3"
-
-[[package]]
 name = "bindgen"
 version = "0.70.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -644,8 +638,6 @@ dependencies = [
  "fff-query-parser",
  "fff-search",
  "git2",
- "mimalloc",
- "serde",
  "serde_json",
  "tracing",
 ]
@@ -694,12 +686,10 @@ name = "fff-nvim"
 version = "0.7.2"
 dependencies = [
  "ahash",
- "blake3",
  "chrono",
  "criterion",
  "ctrlc",
  "dirs",
- "fff-notify-debouncer-full",
  "fff-query-parser",
  "fff-search",
  "git2",
@@ -715,9 +705,7 @@ dependencies = [
  "pathdiff",
  "rand 0.8.5",
  "rayon",
- "serde",
  "smallvec",
- "smartstring",
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
@@ -737,7 +725,6 @@ version = "0.7.2"
 dependencies = [
  "ahash",
  "aho-corasick",
- "bindet",
  "blake3",
  "chrono",
  "criterion",
@@ -770,7 +757,6 @@ dependencies = [
  "serde",
  "serde_json",
  "smallvec",
- "smartstring",
  "tempfile",
  "thiserror 2.0.18",
  "toml",
@@ -2291,18 +2277,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
-name = "smartstring"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3fb72c633efbaa2dd666986505016c32c3044395ceaf881518399d2f4127ee29"
-dependencies = [
- "autocfg",
- "serde",
- "static_assertions",
- "version_check",
-]
-
-[[package]]
 name = "socket2"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2317,12 +2291,6 @@ name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
-
-[[package]]
-name = "static_assertions"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "strsim"

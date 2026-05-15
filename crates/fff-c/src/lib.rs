@@ -269,7 +269,6 @@ pub unsafe extern "C" fn fff_create_instance3(
                 if let Err(e) = shared_frecency.init(tracker) {
                     return FffResult::err(&format!("Failed to acquire frecency lock: {}", e));
                 }
-                let _ = shared_frecency.spawn_gc(frecency_path.clone());
             }
             Err(e) => return FffResult::err(&format!("Failed to init frecency db: {}", e)),
         }
@@ -1474,9 +1473,7 @@ pub unsafe extern "C" fn fff_grep_result_get_match(
 /// ## Safety
 /// `result` must be a valid `FffGrepResult` pointer from `fff_live_grep` or `fff_multi_grep`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fff_grep_result_has_pattern_indices(
-    result: *const FffGrepResult,
-) -> bool {
+pub unsafe extern "C" fn fff_grep_result_has_pattern_indices(result: *const FffGrepResult) -> bool {
     if result.is_null() {
         return false;
     }
@@ -1507,9 +1504,7 @@ pub unsafe extern "C" fn fff_grep_result_get_pattern_indices(
 
     let flat = ffi_types::PATTERN_INDICES.lock().map(|map| {
         map.get(&(result as usize))
-            .map(|per_match| {
-                per_match.iter().flatten().copied().collect::<Vec<u32>>()
-            })
+            .map(|per_match| per_match.iter().flatten().copied().collect::<Vec<u32>>())
             .unwrap_or_default()
     });
 

@@ -70,7 +70,6 @@ fff = { package = "fff-search", path = "../fff-core", version = "0.7.2", feature
 fff-query-parser = { path = "../fff-query-parser", version = "0.7.2" }
 
 # External dependencies
-blake3 = "1.8.2"
 chrono = { version = "0.4", features = ["serde"] }
 ctrlc = "3.4.2"
 dirs = "5.0"
@@ -82,12 +81,10 @@ mimalloc = { version = "0.1.47", features = ["local_dynamic_tls"] }
 mlua = { version = "0.11.1", features = ["module", "luajit"] }
 neo_frizbee = { workspace = true }
 notify = { workspace = true }
-notify-debouncer-full = { workspace = true }
 parking_lot = { workspace = true }
 once_cell = "1.20.2"
 pathdiff = "0.2.1"
-serde = { version = "1.0", features = ["derive"] }
-smartstring = { version = "1.0.1", features = ["serde"] }
+
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

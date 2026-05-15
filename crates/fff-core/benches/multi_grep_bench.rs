@@ -2,7 +2,7 @@ use std::io::Write;
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use fff_search::file_picker::{FilePicker, FilePickerOptions};
-use fff_search::grep::{GrepSearchOptions, GrepMode, parse_grep_query};
+use fff_search::grep::{GrepMode, GrepSearchOptions, parse_grep_query};
 
 /// Create a temporary directory with realistic source files for benchmarking.
 fn setup_repo() -> (tempfile::TempDir, FilePicker) {
@@ -14,7 +14,8 @@ fn setup_repo() -> (tempfile::TempDir, FilePicker) {
             writeln!(
                 f,
                 "pub fn function_{}_{}(arg: {}) -> {} {{",
-                i, j,
+                i,
+                j,
                 ["String", "u32", "bool", "Vec<u8>", "Option<String>"][j % 5],
                 ["Result<()>", "usize", "String", "bool", "Vec<u8>"][j % 5]
             )
@@ -76,13 +77,7 @@ fn bench_multi_grep_vs_sequential(c: &mut Criterion) {
 
     // 2-pattern case
     group.bench_function("multi_grep/2_patterns", |b| {
-        b.iter(|| {
-            black_box(picker.multi_grep(
-                &["validate_input", "validate_output"],
-                &[],
-                &opts,
-            ))
-        })
+        b.iter(|| black_box(picker.multi_grep(&["validate_input", "validate_output"], &[], &opts)))
     });
 
     group.bench_function("2x_grep_sequential/2_patterns", |b| {
@@ -104,13 +99,7 @@ fn bench_multi_grep_vs_sequential(c: &mut Criterion) {
     ];
 
     group.bench_function("multi_grep/5_patterns", |b| {
-        b.iter(|| {
-            black_box(picker.multi_grep(
-                &five_patterns,
-                &[],
-                &opts,
-            ))
-        })
+        b.iter(|| black_box(picker.multi_grep(&five_patterns, &[], &opts)))
     });
 
     group.bench_function("5x_grep_sequential/5_patterns", |b| {

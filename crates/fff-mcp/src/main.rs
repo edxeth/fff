@@ -238,7 +238,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match FrecencyTracker::open(&frecency_db_path) {
             Ok(tracker) => {
                 let _ = shared_frecency.init(tracker);
-                let _ = shared_frecency.spawn_gc(frecency_db_path);
             }
             Err(e) => {
                 eprintln!("Warning: Failed to init frecency db: {}", e);

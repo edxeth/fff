@@ -262,8 +262,13 @@ local function compute_layout(config)
     total_width = width,
     -- Top/bottom preview with prompt-top has a 2-row chrome over-subtraction in
     -- calculate_layout_dimensions (BORDER_SIZE is subtracted twice). Compensate at fullscreen.
-    total_height = (is_fullscreen and prompt_position == 'top'
-      and (preview_position == 'top' or preview_position == 'bottom')) and height + 2 or height,
+    total_height = (
+      is_fullscreen
+      and prompt_position == 'top'
+      and (preview_position == 'top' or preview_position == 'bottom')
+    )
+        and height + 2
+      or height,
     start_col = col,
     start_row = row,
     preview_position = preview_position,

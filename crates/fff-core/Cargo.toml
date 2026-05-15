@@ -45,8 +45,6 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 fff-query-parser = { workspace = true }
 
-# External dependencies
-bindet = { workspace = true }
 blake3 = { workspace = true }
 chrono = { workspace = true }
 dirs = { workspace = true }
@@ -70,7 +68,6 @@ regex = { workspace = true }
 regex-syntax = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-smartstring = { version = "1.0.1", features = ["serde"] }
 toml = "0.8"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

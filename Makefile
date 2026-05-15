@@ -58,9 +58,17 @@ test-setup:
 test-rust:
 	cargo test --workspace --features zlob --exclude fff-nvim
 
+# neovim instance swallows internal crashes and doesn't rise the the error exiting silently
+# so check the stdout in case the sigsegv coming out of fff was printed (actual regression)
 test-lua: test-setup build
-	nvim --headless -u tests/minimal_init.lua \
-		-c "PlenaryBustedDirectory tests/ {minimal_init = 'tests/minimal_init.lua'}" 2>&1
+	@output=$$(nvim --headless -u tests/minimal_init.lua \
+		-c "PlenaryBustedDirectory tests/ {minimal_init = 'tests/minimal_init.lua'}" 2>&1); \
+	echo "$$output"; \
+	if echo "$$output" | grep -qE "SIG(SEGV|ABRT|BUS|FPE|ILL)"; then \
+		echo ""; \
+		echo "FAIL: native crash detected during lua tests"; \
+		exit 1; \
+	fi
 
 test-version: test-setup
 	nvim --headless -u tests/minimal_init.lua \

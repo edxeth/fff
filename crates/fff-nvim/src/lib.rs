@@ -35,24 +35,16 @@ pub fn init_db(
     _: &Lua,
     (frecency_db_path, history_db_path, _use_unsafe_no_lock): (String, String, bool),
 ) -> LuaResult<bool> {
-    let mut frecency = FRECENCY.write().into_lua_result()?;
-    if frecency.is_some() {
-        *frecency = None;
-    }
-    *frecency = Some(FrecencyTracker::open(&frecency_db_path).into_lua_result()?);
+    // Route through SharedFrecency::init / SharedQueryTracker::init so the
+    // GC thread gets spawned + bound to the shared handle's RwLock.
+    FRECENCY
+        .init(FrecencyTracker::open(&frecency_db_path).into_lua_result()?)
+        .into_lua_result()?;
     tracing::info!("Frecency database initialized at {}", frecency_db_path);
-    drop(frecency);
 
-    // Spawn background GC to purge stale entries without blocking startup
-    let _ = FRECENCY.spawn_gc(frecency_db_path);
-
-    let mut query_tracker = QUERY_TRACKER.write().into_lua_result()?;
-    if query_tracker.is_some() {
-        *query_tracker = None;
-    }
-
-    *query_tracker = Some(QueryTracker::open(&history_db_path).into_lua_result()?);
-
+    QUERY_TRACKER
+        .init(QueryTracker::open(&history_db_path).into_lua_result()?)
+        .into_lua_result()?;
     tracing::info!("Query tracker database initialized at {}", history_db_path);
     Ok(true)
 }
@@ -739,6 +731,7 @@ pub fn health_check(lua: &Lua, test_path: Option<String>) -> LuaResult<LuaValue>
                         let healthcheck_table = lua.create_table()?;
                         healthcheck_table.set("path", health.path)?;
                         healthcheck_table.set("disk_size", health.disk_size)?;
+                        healthcheck_table.set("healthy", health.healthy)?;
                         for (name, count) in health.entry_counts {
                             healthcheck_table.set(name, count)?;
                         }
@@ -767,6 +760,7 @@ pub fn health_check(lua: &Lua, test_path: Option<String>) -> LuaResult<LuaValue>
                         let healthcheck_table = lua.create_table()?;
                         healthcheck_table.set("path", health.path)?;
                         healthcheck_table.set("disk_size", health.disk_size)?;
+                        healthcheck_table.set("healthy", health.healthy)?;
                         for (name, count) in health.entry_counts {
                             healthcheck_table.set(name, count)?;
                         }
