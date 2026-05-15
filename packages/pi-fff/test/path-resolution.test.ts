@@ -160,7 +160,7 @@ describe("resolveSearchBase", () => {
     const gd = createGitRepo();
     const r = resolveSearchBase(`${gd}/pkg/`, gd);
     expect(r.basePath).toBe(gd);
-    expect(r.pathConstraint).toBe("pkg/");
+    expect(r.pathConstraint).toBe("pkg");
   });
 });
 
