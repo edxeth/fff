@@ -2,8 +2,8 @@
  * CLI tool for fff-node package management
  *
  * Usage:
- *   npx @ff-labs/fff-node download [tag]  - Download native binary from GitHub
- *   npx @ff-labs/fff-node info            - Show platform and binary info
+ *   npx @edxeth/fff-node download [tag]  - Download native binary from GitHub
+ *   npx @edxeth/fff-node info            - Show platform and binary info
  */
 
 import { readFileSync } from "node:fs";
@@ -94,20 +94,20 @@ async function main() {
       console.log("");
       console.log("Usage:");
       console.log(
-        "  npx @ff-labs/fff-node download [tag]  Download native binary from GitHub (fallback)",
+        "  npx @edxeth/fff-node download [tag]  Download native binary from GitHub (fallback)",
       );
       console.log(
-        "  npx @ff-labs/fff-node info             Show platform and binary info",
+        "  npx @edxeth/fff-node info             Show platform and binary info",
       );
-      console.log("  npx @ff-labs/fff-node version          Show version");
-      console.log("  npx @ff-labs/fff-node help             Show this help message");
+      console.log("  npx @edxeth/fff-node version          Show version");
+      console.log("  npx @edxeth/fff-node help             Show this help message");
       console.log("");
       console.log("Examples:");
       console.log(
-        "  npx @ff-labs/fff-node download          Download latest binary from GitHub",
+        "  npx @edxeth/fff-node download          Download latest binary from GitHub",
       );
       console.log(
-        "  npx @ff-labs/fff-node download abc1234  Download specific release tag",
+        "  npx @edxeth/fff-node download abc1234  Download specific release tag",
       );
       console.log("");
       console.log(

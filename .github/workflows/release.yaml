@@ -411,7 +411,7 @@ jobs:
 
             Install with:
             ```sh
-            curl -fsSL https://raw.githubusercontent.com/dmtrKovalenko/fff.nvim/main/install-mcp.sh | bash
+            curl -fsSL https://raw.githubusercontent.com/edxeth/fff/main/install-mcp.sh | bash
             ```
 
   crates-publish:
@@ -503,11 +503,11 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
           TAG="${{ steps.version.outputs.npm_tag }}"
 
-          echo "Publishing @ff-labs/fff-bun@${VERSION} with tag ${TAG}..."
+          echo "Publishing @edxeth/fff-bun@${VERSION} with tag ${TAG}..."
           make set-npm-version PKG=packages/fff-bun VERSION="$VERSION"
 
           cd packages/fff-bun
-          npm publish --tag "$TAG" --access public || echo "Failed to publish @ff-labs/fff-bun (may already exist)"
+          npm publish --tag "$TAG" --access public || echo "Failed to publish @edxeth/fff-bun (may already exist)"
 
       - name: Publish Node.js package
         env:
@@ -516,13 +516,13 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
           TAG="${{ steps.version.outputs.npm_tag }}"
 
-          echo "Publishing @ff-labs/fff-node@${VERSION} with tag ${TAG}..."
+          echo "Publishing @edxeth/fff-node@${VERSION} with tag ${TAG}..."
           make set-npm-version PKG=packages/fff-node VERSION="$VERSION"
 
           cd packages/fff-node
           npm install
           npm run build
-          npm publish --tag "$TAG" --access public || echo "Failed to publish @ff-labs/fff-node (may already exist)"
+          npm publish --tag "$TAG" --access public || echo "Failed to publish @edxeth/fff-node (may already exist)"
 
       - name: Publish pi-fff package
         env:
@@ -531,8 +531,8 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
           TAG="${{ steps.version.outputs.npm_tag }}"
 
-          echo "Publishing @ff-labs/pi-fff@${VERSION} with tag ${TAG}..."
+          echo "Publishing @edxeth/pi-fff@${VERSION} with tag ${TAG}..."
           make set-npm-version PKG=packages/pi-fff VERSION="$VERSION"
 
           cd packages/pi-fff
-          npm publish --tag "$TAG" --access public || echo "Failed to publish @ff-labs/pi-fff (may already exist)"
+          npm publish --tag "$TAG" --access public || echo "Failed to publish @edxeth/pi-fff (may already exist)"

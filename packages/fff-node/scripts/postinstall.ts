@@ -40,7 +40,7 @@ async function main() {
     console.error("  cargo build --release -p fff-c");
     console.error("");
     console.error(
-      "fff: Or run `npx @ff-labs/fff-node download` after fixing network issues.",
+      "fff: Or run `npx @edxeth/fff-node download` after fixing network issues.",
     );
     // Don't exit with error - allow install to complete
     // The error will surface when the user tries to use the library

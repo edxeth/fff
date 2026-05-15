@@ -40,7 +40,7 @@ Linux / macOS:
 Windows (PowerShell):
 
 >powershell
-    irm https://raw.githubusercontent.com/dmtrKovalenko/fff.nvim/main/install-mcp.ps1 | iex
+    irm https://raw.githubusercontent.com/edxeth/fff/main/install-mcp.ps1 | iex
 <
 
 The scripts live at `install-mcp.sh` <./install-mcp.sh> and `install-mcp.ps1`
@@ -78,7 +78,7 @@ Pi agent extension ~
 INSTALL ~
 
 >bash
-    pi install npm:@ff-labs/pi-fff
+    pi install npm:@edxeth/pi-fff
 <
 
 
@@ -135,7 +135,7 @@ LAZY.NVIM
 
 >lua
     {
-      'dmtrKovalenko/fff.nvim',
+      'edxeth/fff',
       build = function()
         -- downloads a prebuilt binary or falls back to cargo build
         require("fff.download").download_or_build_binary()
@@ -168,7 +168,7 @@ LAZY.NVIM
 VIM.PACK
 
 >lua
-    vim.pack.add({ 'https://github.com/dmtrKovalenko/fff.nvim' })
+    vim.pack.add({ 'https://github.com/edxeth/fff' })
     
     vim.api.nvim_create_autocmd('PackChanged', {
       callback = function(ev)
@@ -367,13 +367,13 @@ queries, frecency ranking, definition classification and much more.
 Node & Bun SDK ~
 
 >bash
-    npm install @ff-labs/fff-node
+    npm install @edxeth/fff-node
     # or
-    bun add @ff-labs/fff-node
+    bun add @edxeth/fff-node
 <
 
 >ts
-    import { FileFinder } from "@ff-labs/fff-node";
+    import { FileFinder } from "@edxeth/fff-node";
     
     const finder = FileFinder.create({ basePath: process.cwd(), aiMode: true });
     if (!finder.ok) throw new Error(finder.error);
@@ -433,8 +433,8 @@ The output is a `cdylib` (`libfff_c.so` / `libfff_c.dylib` / `fff_c.dll`). The
 header lives at `crates/fff-c/include/fff.h` <./crates/fff-c/include/fff.h>.
 
 Prebuilt binaries for every version, including every commit on main, are on the
-releases page <https://github.com/dmtrKovalenko/fff.nvim/releases>. The same
-binaries also ship inside the `@ff-labs/fff-bin-*` npm packages.
+releases page <https://github.com/edxeth/fff/releases>. The same
+binaries also ship inside the `@edxeth/fff-bin-*` npm packages.
 
 
 INSTALL ~
@@ -524,7 +524,7 @@ session.
 
 FFF keeps the index and the file cache resident in one long-lived process and
 exposes the same Rust core through four thin layers: a native crate
-(`fff-search`), a C library (`libfff_c`), a Node/Bun SDK (`@ff-labs/fff-node`),
+(`fff-search`), a C library (`libfff_c`), a Node/Bun SDK (`@edxeth/fff-node`),
 and an MCP server. You call `FileFinder.create()` once, then every subsequent
 search hits warm memory. On a 500k-file Chromium checkout, that is the
 difference between 3-9 **SECONDS** per ripgrep spawn and sub-10 ms per FFF
@@ -615,9 +615,9 @@ REPOSITORY LAYOUT                                 *fff.nvim-repository-layout*
 - `crates/fff-c` - C FFI used by every language binding.
 - `crates/fff-nvim` - Lua/mlua bindings for the Neovim plugin.
 - `crates/fff-mcp` - MCP server binary.
-- `packages/fff-node` - Node.js SDK (`@ff-labs/fff-node`).
-- `packages/fff-bun` - Bun SDK (`@ff-labs/fff-node`).
-- `packages/pi-fff` - pi extension (`@ff-labs/pi-fff`).
+- `packages/fff-node` - Node.js SDK (`@edxeth/fff-node`).
+- `packages/fff-bun` - Bun SDK (`@edxeth/fff-node`).
+- `packages/pi-fff` - pi extension (`@edxeth/pi-fff`).
 - `lua/` - Neovim-side plugin code.
 
 

@@ -3,7 +3,7 @@
 
 use std::sync::OnceLock;
 
-const REPO: &str = "dmtrKovalenko/fff.nvim";
+const REPO: &str = "edxeth/fff";
 const BUILD_HASH: &str = env!("FFF_GIT_HASH");
 
 /// Holds the result of the update check (empty string = up to date or check failed).

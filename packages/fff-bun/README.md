@@ -13,23 +13,23 @@ High-performance fuzzy file finder for Bun, powered by Rust. Perfect for LLM age
 ## Installation
 
 ```bash
-bun add @ff-labs/bun
+bun add @edxeth/fff-bun
 ```
 
-The correct native binary for your platform is installed automatically via platform-specific packages (e.g. `@ff-labs/fff-bin-darwin-arm64`, `@ff-labs/fff-bin-linux-x64-gnu`). No GitHub downloads are needed.
+The correct native binary for your platform is installed automatically via platform-specific packages (e.g. `@edxeth/fff-bin-darwin-arm64`, `@edxeth/fff-bin-linux-x64-gnu`). No GitHub downloads are needed.
 
 ### Supported Platforms
 
 | Platform | Architecture | Package |
 |----------|-------------|---------|
-| macOS | ARM64 (Apple Silicon) | `@ff-labs/fff-bin-darwin-arm64` |
-| macOS | x64 (Intel) | `@ff-labs/fff-bin-darwin-x64` |
-| Linux | x64 (glibc) | `@ff-labs/fff-bin-linux-x64-gnu` |
-| Linux | ARM64 (glibc) | `@ff-labs/fff-bin-linux-arm64-gnu` |
-| Linux | x64 (musl) | `@ff-labs/fff-bin-linux-x64-musl` |
-| Linux | ARM64 (musl) | `@ff-labs/fff-bin-linux-arm64-musl` |
-| Windows | x64 | `@ff-labs/fff-bin-win32-x64` |
-| Windows | ARM64 | `@ff-labs/fff-bin-win32-arm64` |
+| macOS | ARM64 (Apple Silicon) | `@edxeth/fff-bin-darwin-arm64` |
+| macOS | x64 (Intel) | `@edxeth/fff-bin-darwin-x64` |
+| Linux | x64 (glibc) | `@edxeth/fff-bin-linux-x64-gnu` |
+| Linux | ARM64 (glibc) | `@edxeth/fff-bin-linux-arm64-gnu` |
+| Linux | x64 (musl) | `@edxeth/fff-bin-linux-x64-musl` |
+| Linux | ARM64 (musl) | `@edxeth/fff-bin-linux-arm64-musl` |
+| Windows | x64 | `@edxeth/fff-bin-win32-x64` |
+| Windows | ARM64 | `@edxeth/fff-bin-win32-arm64` |
 
 If the platform package isn't available, the postinstall script will attempt to download from GitHub releases as a fallback.
 
@@ -259,7 +259,7 @@ If prebuilt binaries aren't available for your platform:
 
 ```bash
 # Clone the repository
-git clone https://github.com/dmtrKovalenko/fff.nvim
+git clone https://github.com/edxeth/fff
 cd fff.nvim
 
 # Build the C library

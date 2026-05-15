@@ -7,11 +7,11 @@
  * Each `FileFinder` instance is backed by an independent native file picker.
  * Create as many as you need and destroy them when done.
  *
- * Uses ffi-rs to load the same native libfff_c binary used by @ff-labs/fff-bun.
+ * Uses ffi-rs to load the same native libfff_c binary used by @edxeth/fff-bun.
  *
  * @example
  * ```typescript
- * import { FileFinder } from "@ff-labs/fff-node";
+ * import { FileFinder } from "@edxeth/fff-node";
  *
  * // Create a file finder instance
  * const result = FileFinder.create({ basePath: "/path/to/project" });

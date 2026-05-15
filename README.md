@@ -32,7 +32,7 @@ curl -L https://dmtrkovalenko.dev/install-fff-mcp.sh | bash
 Windows (PowerShell):
 
 ```powershell
-irm https://raw.githubusercontent.com/dmtrKovalenko/fff.nvim/main/install-mcp.ps1 | iex
+irm https://raw.githubusercontent.com/edxeth/fff/main/install-mcp.ps1 | iex
 ```
 
 The scripts live at [`install-mcp.sh`](./install-mcp.sh) and [`install-mcp.ps1`](./install-mcp.ps1) if you want to read them first.
@@ -68,7 +68,7 @@ The MCP server gives any agent a file search tool that is faster and more token-
 ### Install
 
 ```bash
-pi install npm:@ff-labs/pi-fff
+pi install npm:@edxeth/pi-fff
 ```
 
 ### Modes
@@ -115,7 +115,7 @@ https://github.com/user-attachments/assets/5d0e1ce9-642c-4c44-aa88-01b05bb86abb
 
 ```lua
 {
-  'dmtrKovalenko/fff.nvim',
+  'edxeth/fff',
   build = function()
     -- downloads a prebuilt binary or falls back to cargo build
     require("fff.download").download_or_build_binary()
@@ -147,7 +147,7 @@ https://github.com/user-attachments/assets/5d0e1ce9-642c-4c44-aa88-01b05bb86abb
 #### vim.pack
 
 ```lua
-vim.pack.add({ 'https://github.com/dmtrKovalenko/fff.nvim' })
+vim.pack.add({ 'https://github.com/edxeth/fff' })
 
 vim.api.nvim_create_autocmd('PackChanged', {
   callback = function(ev)
@@ -336,13 +336,13 @@ The best file search picker for neovim. Period. Faster and more intuitive querie
 </summary>
 
 ```bash
-npm install @ff-labs/fff-node
+npm install @edxeth/fff-node
 # or
-bun add @ff-labs/fff-node
+bun add @edxeth/fff-node
 ```
 
 ```ts
-import { FileFinder } from "@ff-labs/fff-node";
+import { FileFinder } from "@edxeth/fff-node";
 
 const finder = FileFinder.create({ basePath: process.cwd(), aiMode: true });
 if (!finder.ok) throw new Error(finder.error);
@@ -403,7 +403,7 @@ cargo build --release -p fff-c --features zlob
 
 The output is a `cdylib` (`libfff_c.so` / `libfff_c.dylib` / `fff_c.dll`). The header lives at [`crates/fff-c/include/fff.h`](./crates/fff-c/include/fff.h).
 
-Prebuilt binaries for every version, including every commit on main, are on the [releases page](https://github.com/dmtrKovalenko/fff.nvim/releases). The same binaries also ship inside the `@ff-labs/fff-bin-*` npm packages.
+Prebuilt binaries for every version, including every commit on main, are on the [releases page](https://github.com/edxeth/fff/releases). The same binaries also ship inside the `@edxeth/fff-bin-*` npm packages.
 
 ### Install
 
@@ -480,7 +480,7 @@ Stable C ABI. Bind from C/C++, Zig, Go via cgo, Python via ctypes, or anything w
 
 FFF is a file search library, not a CLI. Ripgrep and fzf are great tools, but they are command-line programs: every call forks a new process, re-reads `.gitignore`, re-stats directories, and rebuilds whatever state it needs in memory before it can answer. That is fine when you grep once from a shell. It is bad when an editor or an AI agent wants to run hundreds of searches per session.
 
-FFF keeps the index and the file cache resident in one long-lived process and exposes the same Rust core through four thin layers: a native crate (`fff-search`), a C library (`libfff_c`), a Node/Bun SDK (`@ff-labs/fff-node`), and an MCP server. You call `FileFinder.create()` once, then every subsequent search hits warm memory. On a 500k-file Chromium checkout, that is the difference between 3-9 **SECONDS** per ripgrep spawn and sub-10 ms per FFF query.
+FFF keeps the index and the file cache resident in one long-lived process and exposes the same Rust core through four thin layers: a native crate (`fff-search`), a C library (`libfff_c`), a Node/Bun SDK (`@edxeth/fff-node`), and an MCP server. You call `FileFinder.create()` once, then every subsequent search hits warm memory. On a 500k-file Chromium checkout, that is the difference between 3-9 **SECONDS** per ripgrep spawn and sub-10 ms per FFF query.
 
 Algorithm for fuzzy matching is much more comprehensive than fzf's algorithm it is **typo-resistant** and we provide a query language with additional constraint parsing for prefiltering e.g. "*.rs !test/ shcema" is a perfectly valid query for fff, but fzf wouldn't find anything even for a single typo in "shcema".
 
@@ -540,9 +540,9 @@ If you are running one grep from a terminal, `rg` is still the right tool. If yo
 - `crates/fff-c` - C FFI used by every language binding.
 - `crates/fff-nvim` - Lua/mlua bindings for the Neovim plugin.
 - `crates/fff-mcp` - MCP server binary.
-- `packages/fff-node` - Node.js SDK (`@ff-labs/fff-node`).
-- `packages/fff-bun` - Bun SDK (`@ff-labs/fff-node`).
-- `packages/pi-fff` - pi extension (`@ff-labs/pi-fff`).
+- `packages/fff-node` - Node.js SDK (`@edxeth/fff-node`).
+- `packages/fff-bun` - Bun SDK (`@edxeth/fff-node`).
+- `packages/pi-fff` - pi extension (`@edxeth/pi-fff`).
 - `lua/` - Neovim-side plugin code.
 
 ## Contributing
