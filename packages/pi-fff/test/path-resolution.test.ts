@@ -23,6 +23,8 @@ function createGitRepo(): string {
   writeFileSync(d + "/pkg/main.go", "package main");
   writeFileSync(d + "/My Project/lib.rs", "pub fn hello()");
   execSync("git init", { cwd: d, stdio: "ignore" });
+  execSync("git config user.email test@test.com", { cwd: d, stdio: "ignore" });
+  execSync("git config user.name test", { cwd: d, stdio: "ignore" });
   execSync("git add -A", { cwd: d, stdio: "ignore" });
   execSync("git commit -m init", { cwd: d, stdio: "ignore" });
   return d;
@@ -146,9 +148,10 @@ describe("resolveSearchBase", () => {
   });
 
   test("resolves space path to git root with scopePrefix", () => {
-const r = resolveSearchBase("My Project/**", gitDir);
+    const gd = createGitRepo();
+    const r = resolveSearchBase("My Project/**", gd);
     // Should resolve to git root with scopePrefix
-    expect(r.basePath).toBe(gitDir);
+    expect(r.basePath).toBe(gd);
     expect(r.pathConstraint).toBeUndefined();
     expect(r.scopePrefix).toBe("My Project/");
   });
@@ -182,7 +185,8 @@ describe("buildSearchScopes", () => {
   });
 
   test("space path gets scopePrefix", () => {
-const scopes = buildSearchScopes(["My Project/**"], "needle", undefined, gitDir);
+    const gd = createGitRepo();
+    const scopes = buildSearchScopes(["My Project/**"], "needle", undefined, gd);
     expect(scopes).toHaveLength(1);
     expect(scopes[0].scopePrefix).toBe("My Project/");
     // Without git root: no scopePrefix
