@@ -27,7 +27,7 @@ import type {
   SearchResult,
 } from "@edxeth/fff-node";
 import { FileFinder } from "@edxeth/fff-node";
-import { buildQuery, normalizeExcludes } from "./query";
+import { buildQuery, buildSearchScopes, invalidPathMessage, normalizeExcludes, normalizePathConstraint, mergeGrepResults, mergeFindResults, resolveSearchBase, type SearchScope } from "./query";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -92,14 +92,18 @@ function getCursor(id: string): StoredGrepCursor | undefined {
 }
 
 // Find pagination uses a page-index cursor: native `fileSearch` takes
-// pageIndex/pageSize, so the cursor is just the next page index paired with
-// the query+limit that produced it. Stored tokens are opaque IDs to the agent.
+// pageIndex/pageSize, so the cursor stores per-scope page indices.
+// Multi-scope cursors handle multiple independent searches.
 interface FindCursor {
-  basePath: string;
-  query: string;
+  // Each scope tracks its own search state within one base directory
+  scopes: Array<{
+    basePath: string;
+    query: string;
+    nextPageIndex: number;
+    scopePrefix?: string;
+  }>;
   pattern: string;
   pageSize: number;
-  nextPageIndex: number;
   includeIgnored: boolean;
 }
 
@@ -267,16 +271,6 @@ function pathLikePatternMessage(_pattern: string): string {
   return "Path/glob belongs in path, not pattern";
 }
 
-function pathLooksLikeMultiplePaths(pathConstraint: string): boolean {
-  const parts = pathConstraint.trim().split(/\s+/).filter(Boolean);
-  if (parts.length < 2) return false;
-  return parts.every((part) => part.includes("/") || part.includes("\\"));
-}
-
-function multiplePathsMessage(): string {
-  return "Multiple paths are not supported in path; use one file, directory, or glob";
-}
-
 function formatFindOutput(
   result: SearchResult,
   limit: number,
@@ -412,47 +406,10 @@ export default function fffExtension(pi: ExtensionAPI) {
     return currentMode !== "tools-only";
   }
 
-  function resolveGitRoot(dir: string): string | null {
-    try {
-      const root = execSync("git rev-parse --show-toplevel", {
-        cwd: dir,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-        timeout: 3000,
-      }).trim();
-      return root || null;
-    } catch {
-      return null;
-    }
-  }
 
-  function expandHomePath(pathConstraint: string): string {
-    const home = process.env.HOME ?? process.env.USERPROFILE;
-    if (!home) return pathConstraint;
-    return pathConstraint.replace(/^~($|\/|\\)/, (_, sep) => home + sep);
-  }
 
-  function concreteStatPath(pathConstraint: string, cwd = activeCwd): string {
-    const expanded = expandHomePath(pathConstraint);
-    const absolute = path.isAbsolute(expanded) ? expanded : path.resolve(cwd, expanded);
-    const wildcard = absolute.search(/[*?[{]/);
-    const concrete = wildcard === -1 ? absolute : absolute.slice(0, wildcard);
-    if (wildcard === -1) return absolute;
-    return concrete.endsWith(path.sep) ? concrete.slice(0, -1) : path.dirname(concrete);
-  }
 
-  function hasHiddenSegment(pathConstraint: string): boolean {
-    return pathConstraint
-      .split(/[\\/]+/)
-      .some((segment) => segment.startsWith(".") && segment !== "." && segment !== "..");
-  }
 
-  function invalidPathMessage(pathConstraint: string, cwd = activeCwd): string | null {
-    const statPath = concreteStatPath(pathConstraint, cwd);
-    return fs.existsSync(statPath)
-      ? null
-      : `Path not found: ${statPath || pathConstraint}`;
-  }
 
   async function noResultsMessage(
     base: string,
@@ -475,45 +432,7 @@ export default function fffExtension(pi: ExtensionAPI) {
     return base;
   }
 
-  function absolutePathBase(pathConstraint: string): {
-    basePath: string;
-    pathConstraint?: string;
-  } {
-    const wildcard = pathConstraint.search(/[*?[{]/);
-    const hasWildcard = wildcard !== -1;
-    const concrete = hasWildcard ? pathConstraint.slice(0, wildcard) : pathConstraint;
-    const concreteDir = concrete.endsWith(path.sep)
-      ? concrete.slice(0, -1)
-      : path.dirname(concrete);
-    const statPath = hasWildcard ? concreteDir : pathConstraint;
-    const isDir = fs.existsSync(statPath) && fs.statSync(statPath).isDirectory();
-    const fallbackBase = isDir ? statPath : path.dirname(statPath);
-    const gitRoot = resolveGitRoot(fallbackBase);
-    const basePath = gitRoot ?? fallbackBase;
-    const relative = path.relative(basePath, pathConstraint).replaceAll(path.sep, "/");
-    const pathValue =
-      relative && relative !== "**" && relative !== "**/*" ? relative : undefined;
-    return { basePath, pathConstraint: pathValue };
-  }
 
-  function resolveSearchBase(pathConstraint: string | undefined): {
-    basePath: string;
-    pathConstraint?: string;
-  } {
-    if (!pathConstraint) return { basePath: activeCwd, pathConstraint };
-    const expanded = expandHomePath(pathConstraint);
-    if (path.isAbsolute(expanded)) return absolutePathBase(expanded);
-    if (expanded === ".." || expanded.startsWith(`..${path.sep}`)) {
-      return absolutePathBase(path.resolve(activeCwd, expanded));
-    }
-    if (/\s/.test(expanded) && fs.existsSync(concreteStatPath(expanded))) {
-      return absolutePathBase(path.resolve(activeCwd, expanded));
-    }
-    if (hasHiddenSegment(expanded) && fs.existsSync(concreteStatPath(expanded))) {
-      return absolutePathBase(path.resolve(activeCwd, expanded));
-    }
-    return { basePath: activeCwd, pathConstraint };
-  }
 
   function finderKey(basePath: string, includeIgnored: boolean): string {
     return `${includeIgnored ? "ignored" : "normal"}:${basePath}`;
@@ -752,6 +671,9 @@ export default function fffExtension(pi: ExtensionAPI) {
     destroyFinder();
   });
 
+  // ── Multi-path search helpers ──
+
+
   // --- Shared render helpers ---
 
   const renderTextResult = (
@@ -788,9 +710,9 @@ export default function fffExtension(pi: ExtensionAPI) {
       description: "Search pattern (literal text or regex)",
     }),
     path: Type.Optional(
-      Type.String({
+      Type.Array(Type.String(), {
         description:
-          "Single path constraint: one file, one directory, or one glob. Do not pass multiple paths. Applied to the full repo-relative path.",
+          "Path constraints: files, directories, or globs. Each entry is one scope \u2014 searches OR across all entries. Paths with spaces work correctly as single entries.",
       }),
     ),
     exclude: Type.Optional(
@@ -832,7 +754,7 @@ export default function fffExtension(pi: ExtensionAPI) {
     promptGuidelines: [
       "Use for content, not paths.",
       "Use one literal identifier or phrase first; regex only when needed.",
-      "Use path for one scope and exclude for noise, e.g. path: 'src/', exclude: 'test/,*.min.js'.",
+      "Use path to scope searches by directory, file, or glob. Multiple paths search as OR: path: ['src/', 'tests/'].",
       "Set includeIgnored only when intentionally searching ignored files such as node_modules or build output.",
       "Set caseSensitive: true only when exact case matters; otherwise smart-case applies.",
       "Use multi_grep for 2-6 literal identifiers or naming variants; grep regex alternation is OK for a simple 2-way OR.",
@@ -843,20 +765,15 @@ export default function fffExtension(pi: ExtensionAPI) {
     async execute(_toolCallId, params, signal) {
       if (signal?.aborted) throw new Error("Operation aborted");
 
-      if (params.path && pathLooksLikeMultiplePaths(params.path)) {
-        throw new Error(multiplePathsMessage());
-      }
-      const invalidPath = params.path ? invalidPathMessage(params.path) : null;
+      const paths = params.path ?? [];
+      const invalidPath = paths.length > 0 ? invalidPathMessage(paths) : null;
       if (invalidPath) throw new Error(invalidPath);
 
-      const searchBase = resolveSearchBase(params.path);
+      const scopes = buildSearchScopes(paths, params.pattern, params.exclude, activeCwd);
       const effectiveLimit = Math.max(1, params.limit ?? DEFAULT_GREP_LIMIT);
-      const query = buildQuery(
-        searchBase.pathConstraint,
-        params.pattern,
-        params.exclude,
-        searchBase.basePath,
-      );
+      const storedCursor = params.cursor ? getCursor(params.cursor) : undefined;
+      const includeIgnored = storedCursor?.includeIgnored ?? params.includeIgnored === true;
+
       // Auto-detect: regex if the pattern has regex metacharacters AND parses
       // as a valid regex, otherwise plain literal. The fuzzy fallback below
       // only kicks in for plain mode — regex queries are intentional.
@@ -896,60 +813,58 @@ export default function fffExtension(pi: ExtensionAPI) {
       // caseSensitive override flips smartCase off; omitting it keeps smart-case
       // (case-insensitive when pattern is all lowercase).
       const smartCase = params.caseSensitive !== true;
-      const storedCursor = params.cursor ? getCursor(params.cursor) : undefined;
-      const includeIgnored = storedCursor?.includeIgnored ?? params.includeIgnored === true;
 
-      const grepResult = await withFinderLease(
-        searchBase.basePath,
-        (finder) =>
-          finder.grep(query, {
-            mode,
-            smartCase,
-            maxMatchesPerFile: Math.min(effectiveLimit, 50),
-            cursor: storedCursor?.cursor ?? null,
-            beforeContext: params.context ?? 0,
-            afterContext: params.context ?? 0,
-            classifyDefinitions: true,
-          }),
-        includeIgnored,
-      );
+      // Run grep across all search scopes, merge results
+      const grepOptions = {
+        mode,
+        smartCase,
+        maxMatchesPerFile: Math.min(effectiveLimit, 50),
+        cursor: storedCursor?.cursor ?? null,
+        beforeContext: params.context ?? 0,
+        afterContext: params.context ?? 0,
+        classifyDefinitions: true,
+      };
 
-      if (!grepResult.ok) throw new Error(grepResult.error);
+      const grepResults: GrepResult[] = [];
+      for (const scope of scopes) {
+        const r = await withFinderLease(scope.basePath, (finder) => finder.grep(scope.query, grepOptions), includeIgnored);
+        if (!r.ok) throw new Error(r.error);
+        // Apply scopePrefix: keep only files under the space-containing directory
+        if (scope.scopePrefix) {
+          const filtered = r.value.items.filter((m) => m.relativePath.startsWith(scope.scopePrefix!));
+          grepResults.push({ ...r.value, items: filtered, totalMatched: filtered.length });
+        } else {
+          grepResults.push(r.value);
+        }
+        // If using a cursor, only run the first scope (cursor is single-scope)
+        if (storedCursor) break;
+      }
 
-      let result = grepResult.value;
+      let result = mergeGrepResults(grepResults);
       let fuzzyNotice: string | null = null;
 
-      // Fuzzy fallback helps broad plain greps, but excludes mean exact filtering.
+      // Fuzzy fallback: if exact produces no results, try fuzzy on each scope
       if (
         result.items.length === 0 &&
         !params.cursor &&
         !params.exclude &&
         mode !== "regex"
       ) {
-        const fuzzy = await withFinderLease(
-          searchBase.basePath,
-          (finder) =>
-            finder.grep(query, {
-              mode: "fuzzy",
-              smartCase,
-              maxMatchesPerFile: Math.min(effectiveLimit, 50),
-              cursor: null,
-              beforeContext: 0,
-              afterContext: 0,
-              classifyDefinitions: true,
-            }),
-          includeIgnored,
-        );
-
-        if (fuzzy.ok && fuzzy.value.items.length > 0) {
+        const fuzzyResults: GrepResult[] = [];
+        for (const scope of scopes) {
+          const r = await withFinderLease(scope.basePath, (finder) =>
+            finder.grep(scope.query, { ...grepOptions, mode: "fuzzy", cursor: null }), includeIgnored);
+          if (r.ok && r.value.items.length > 0) fuzzyResults.push(r.value);
+        }
+        if (fuzzyResults.length > 0) {
           fuzzyNotice = `0 exact matches. Maybe you meant this?`;
-          result = fuzzy.value;
+          result = mergeGrepResults(fuzzyResults);
         }
       }
 
-      if (result.items.length === 0)
+      if (result.items.length === 0 && scopes.length > 0)
         throw new Error(
-          await noResultsMessage("No matches found", searchBase.basePath, params.path, includeIgnored),
+          await noResultsMessage("No matches found", scopes[0].basePath, paths[0], includeIgnored),
         );
 
       let output = formatGrepOutput(result);
@@ -977,7 +892,7 @@ export default function fffExtension(pi: ExtensionAPI) {
     renderCall(args, theme, context) {
       const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
       const pattern = args?.pattern ?? "";
-      const path = args?.path ?? ".";
+      const path = args?.path?.join(", ") ?? ".";
       let content =
         theme.fg("toolTitle", theme.bold(toolNames.grep)) +
         " " +
@@ -1003,9 +918,9 @@ export default function fffExtension(pi: ExtensionAPI) {
         "Fuzzy filename search and glob search. Frecency-ranked, git-aware. Multi-word = narrower (AND) not bound to order, use for multi word related concept search. Prefer this over ls/find/bash as the first exploration step whenever the user names a concept, feature, or symbol — it surfaces the relevant files in one call. Only use ls/read on a directory when you specifically need the alphabetical layout of an unknown repo, or when a concept search returned nothing.",
     }),
     path: Type.Optional(
-      Type.String({
+      Type.Array(Type.String(), {
         description:
-          "Single path constraint: one file, one directory, or one glob. Do not pass multiple paths. Applied to the full repo-relative path.",
+          "Path constraints: files, directories, or globs. Each entry is one scope \u2014 searches OR across all entries. Paths with spaces work correctly as single entries.",
       }),
     ),
     exclude: Type.Optional(
@@ -1039,9 +954,9 @@ export default function fffExtension(pi: ExtensionAPI) {
       "Use for paths, not content; use grep for content.",
       "Pattern is fuzzy over the whole repo-relative path, not just the basename.",
       "Keep pattern to 1-2 terms; extra words narrow results.",
-      "Put exact paths, directories, and globs in path, not pattern, e.g. path: '**/profile.h'.",
-      "Use only one path constraint: one file, directory, or glob.",
-      "For directory contents, use path: 'dir/**' with pattern: '' or '*'.",
+      "Put exact paths, directories, and globs in path, not pattern, e.g. path: ['**/profile.h'].",
+      "Multiple paths search as OR: path: ['src/', 'tests/'].",
+      "For directory contents, use path: ['dir/**'] with pattern: '' or '*'.",
       "Use exclude to cut noise, e.g. 'test/,*.min.js'.",
       "Set includeIgnored only when intentionally searching ignored files such as node_modules or build output.",
     ],
@@ -1053,54 +968,111 @@ export default function fffExtension(pi: ExtensionAPI) {
       // Resume from a prior cursor if supplied — cursor owns basePath+query+pageSize
       // so the agent can't accidentally mix patterns across pages.
       const resumed = params.cursor ? getFindCursor(params.cursor) : undefined;
-      if (!params.cursor && params.path && pathLooksLikeMultiplePaths(params.path)) {
-        throw new Error(multiplePathsMessage());
-      }
+      const paths = !params.cursor ? (params.path ?? []) : [];
       const invalidPath =
-        !params.cursor && params.path ? invalidPathMessage(params.path) : null;
+        !params.cursor && paths.length > 0 ? invalidPathMessage(paths) : null;
       if (invalidPath) throw new Error(invalidPath);
 
-      const resolvedBase = resolveSearchBase(params.path);
-      const basePath = resumed?.basePath ?? resolvedBase.basePath;
+      const scopes = resumed
+        ? resumed.scopes.map((s) => ({ basePath: s.basePath, query: s.query, scopePrefix: s.scopePrefix }))
+        : buildSearchScopes(paths, params.pattern, params.exclude, activeCwd);
       const effectiveLimit = resumed
         ? resumed.pageSize
         : Math.max(1, params.limit ?? DEFAULT_FIND_LIMIT);
-      const query = resumed
-        ? resumed.query
-        : buildQuery(
-            resolvedBase.pathConstraint,
-            params.pattern,
-            params.exclude,
-            resolvedBase.basePath,
-          );
+      const basePath = scopes.length > 0 ? scopes[0].basePath : activeCwd;
       const pattern = resumed ? resumed.pattern : params.pattern;
       if (!resumed && patternLooksLikePath(pattern)) {
         throw new Error(pathLikePatternMessage(pattern));
       }
-      const pageIndex = resumed?.nextPageIndex ?? 0;
+      const pageIndex = resumed?.scopes[0]?.nextPageIndex ?? 0;
       const includeIgnored = resumed?.includeIgnored ?? params.includeIgnored === true;
 
-      const searchResult = await withFinderLease(
-        basePath,
-        (finder) =>
-          finder.fileSearch(query, {
-            pageIndex,
-            pageSize: effectiveLimit,
-          }),
-        includeIgnored,
-      );
-      if (!searchResult.ok) throw new Error(searchResult.error);
-
-      let result = searchResult.value;
-      if (result.items.length === 0 && /\s/.test(pattern.trim())) {
-        const scopedQuery = buildQuery(
-          resolvedBase.pathConstraint,
-          "",
-          params.exclude,
-          basePath,
+      let result: SearchResult;
+      let hasMore = false;
+      if (resumed) {
+        // Resume: iterate all cursor scopes, merge results
+        const results: SearchResult[] = [];
+        for (const scopeInfo of resumed.scopes) {
+          const r = await withFinderLease(scopeInfo.basePath, (finder) =>
+            finder.fileSearch(scopeInfo.query, {
+              pageIndex: scopeInfo.nextPageIndex,
+              pageSize: effectiveLimit,
+            }), includeIgnored);
+          if (!r.ok) throw new Error(r.error);
+          // Apply scopePrefix for space-paths resolved to git root
+          if (scopeInfo.scopePrefix && r.value.items.length > 0) {
+            const keep: Array<{ item: FileItem; score: Score }> = [];
+            for (let i = 0; i < r.value.items.length; i++) {
+              if (r.value.items[i].relativePath.startsWith(scopeInfo.scopePrefix!)) {
+                keep.push({ item: r.value.items[i], score: r.value.scores[i] });
+              }
+            }
+            results.push({
+              items: keep.map((k) => k.item),
+              scores: keep.map((k) => k.score),
+              totalMatched: keep.length,
+              totalFiles: r.value.totalFiles,
+            });
+          } else {
+            results.push(r.value);
+          }
+        }
+        result = mergeFindResults(results);
+      } else if (paths.length <= 1) {
+        // Fast path: single scope (or resumed cursor with first scope)
+        const scope = scopes[0] ?? { basePath, query: buildQuery([], pattern, params.exclude, basePath) };
+        const scopeInfo = resumed?.scopes[0];
+        const searchResult = await withFinderLease(
+          scopeInfo?.basePath ?? scope.basePath,
+          (finder) =>
+            finder.fileSearch(resumed ? scopeInfo!.query : scope.query, {
+              pageIndex: resumed ? scopeInfo!.nextPageIndex : 0,
+              pageSize: effectiveLimit,
+            }),
+          includeIgnored,
         );
+        if (!searchResult.ok) throw new Error(searchResult.error);
+        result = searchResult.value;
+      } else {
+        // Multi-path: search each scope, merge
+        const results: SearchResult[] = [];
+        let anyScopeFull = false;
+        for (const scope of scopes) {
+          const r = await withFinderLease(scope.basePath, (finder) =>
+            finder.fileSearch(scope.query, { pageIndex: 0, pageSize: effectiveLimit }), includeIgnored);
+          if (r.ok) {
+            anyScopeFull = anyScopeFull || r.value.items.length >= effectiveLimit;
+            // Apply scopePrefix: keep only files under the space-containing directory
+            if (scope.scopePrefix && r.value.items.length > 0) {
+              const keep: Array<{ item: FileItem; score: Score }> = [];
+              for (let i = 0; i < r.value.items.length; i++) {
+                if (r.value.items[i].relativePath.startsWith(scope.scopePrefix!)) {
+                  keep.push({ item: r.value.items[i], score: r.value.scores[i] });
+                }
+              }
+              results.push({
+                items: keep.map((k) => k.item),
+                scores: keep.map((k) => k.score),
+                totalMatched: keep.length,
+                totalFiles: r.value.totalFiles,
+              });
+            } else {
+              results.push(r.value);
+            }
+          }
+        }
+        result = mergeFindResults(results);
+        // For multi-scope, hasMore is based on whether ANY scope filled its page
+        if (anyScopeFull) {
+          hasMore = true;
+        }
+      }
+      // Space-in-pattern fallback: only for single-scope searches
+      if (result.items.length === 0 && /\s/.test(pattern.trim()) && !resumed && paths.length <= 1) {
+        const scope = scopes[0] ?? { basePath, query: "" };
+        const scopedQuery = buildQuery(paths, "", params.exclude, scope.basePath);
         const fallback = await withFinderLease(
-          basePath,
+          scope.basePath,
           (finder) =>
             finder.fileSearch(scopedQuery, {
               pageIndex: 0,
@@ -1128,11 +1100,9 @@ export default function fffExtension(pi: ExtensionAPI) {
       let regexFallbackUsed = false;
       let regexFallbackAlts: string[] = [];
 
-      // Regex alternation recovery: models commonly write "foo|bar" expecting OR,
-      // but FFF fuzzy treats | as a literal character that no file path contains.
-      // When | is present, search each alternative independently and merge results,
-      // preserving true OR semantics instead of raw fuzzy matching.
-      if (!params.cursor && !resumed && pattern.includes("|")) {
+      // Regex alternation fallback: only for single-scope searches
+      if (!params.cursor && !resumed && paths.length <= 1 && pattern.includes("|")) {
+        const scope = scopes[0] ?? { basePath: activeCwd, query: "" };
         const alternatives = pattern
           .split("|")
           .map((s) => s.trim().replace(/[()]/g, ""))
@@ -1143,14 +1113,9 @@ export default function fffExtension(pi: ExtensionAPI) {
           const merged: FileItem[] = [];
           let totalFiles = 0;
           for (const alt of alternatives) {
-            const altQuery = buildQuery(
-              resolvedBase.pathConstraint,
-              alt,
-              params.exclude,
-              basePath,
-            );
+            const altQuery = buildQuery(paths, alt, params.exclude, scope.basePath);
             const altResult = await withFinderLease(
-              basePath,
+              scope.basePath,
               (finder) =>
                 finder.fileSearch(altQuery, {
                   pageIndex: 0,
@@ -1195,18 +1160,17 @@ export default function fffExtension(pi: ExtensionAPI) {
 
       if (result.items.length === 0)
         throw new Error(
-          await noResultsMessage("No files found matching pattern", basePath, params.path, includeIgnored),
+          await noResultsMessage("No files found matching pattern", basePath, paths[0], includeIgnored),
         );
 
       const formatted = formatFindOutput(result, effectiveLimit, pattern);
       let output = formatted.output;
 
-      // Infer hasMore: native fileSearch fills pageSize when more results
-      // exist, so if we got a full page AND totalMatched exceeds what we've
-      // shown so far there's another page to fetch.
-      const shownSoFar = pageIndex * effectiveLimit + result.items.length;
-      const hasMore =
-        result.items.length >= effectiveLimit && result.totalMatched > shownSoFar;
+      // Infer hasMore for single-scope (multi-scope tracked in search block above).
+      if (!resumed && !hasMore) {
+        const shownSoFar = pageIndex * effectiveLimit + result.items.length;
+        hasMore = result.items.length >= effectiveLimit && (result.totalMatched ?? result.items.length) > shownSoFar;
+      }
 
       const notices: string[] = [];
       if (formatted.weak && formatted.shownCount > 0)
@@ -1218,13 +1182,16 @@ export default function fffExtension(pi: ExtensionAPI) {
         notices.push(`${formatted.shownCount} exact matches shown. Fuzzy tail hidden`);
 
       if (!formatted.weak && !formatted.literalTailSuppressed && hasMore && !regexFallbackUsed) {
-        const remaining = result.totalMatched - shownSoFar;
+        const remaining = result.totalMatched - (pageIndex * effectiveLimit + result.items.length);
         const cursorId = storeFindCursor({
-          basePath,
-          query,
+          scopes: scopes.map((s) => ({
+            basePath: s.basePath,
+            query: s.query,
+            nextPageIndex: pageIndex + 1,
+            scopePrefix: s.scopePrefix,
+          })),
           pattern,
           pageSize: effectiveLimit,
-          nextPageIndex: pageIndex + 1,
           includeIgnored,
         });
         notices.push(`${remaining} more. Next page: find cursor="${cursorId}"`);
@@ -1249,7 +1216,7 @@ export default function fffExtension(pi: ExtensionAPI) {
     renderCall(args, theme, context) {
       const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
       const pattern = args?.pattern ?? "";
-      const path = args?.path ?? ".";
+      const path = args?.path?.join(", ") ?? ".";
       let content =
         theme.fg("toolTitle", theme.bold(toolNames.find)) +
         " " +
@@ -1280,9 +1247,9 @@ export default function fffExtension(pi: ExtensionAPI) {
         maxItems: 20,
       }),
       path: Type.Optional(
-        Type.String({
+        Type.Array(Type.String(), {
           description:
-            "Single path constraint: one file, one directory, or one glob. Do not pass multiple paths. Applied to the full repo-relative path.",
+            "Path constraints: files, directories, or globs. Each entry is one scope \u2014 searches OR across all entries. Paths with spaces work correctly as single entries.",
         }),
       ),
       exclude: Type.Optional(
@@ -1329,28 +1296,44 @@ export default function fffExtension(pi: ExtensionAPI) {
         if (signal?.aborted) throw new Error("Operation aborted");
         if (!params.patterns?.length)
           throw new Error("patterns array must have at least 1 element");
-        if (params.path && pathLooksLikeMultiplePaths(params.path)) {
-          throw new Error(
-            "Path appears to contain multiple entries — multi_grep accepts a single path. Use separate calls or a glob pattern.",
-          );
-        }
-        const invalidPath = params.path ? invalidPathMessage(params.path) : null;
+        const mgPaths = params.path ?? [];
+        const invalidPath = mgPaths.length > 0 ? invalidPathMessage(mgPaths) : null;
         if (invalidPath) throw new Error(invalidPath);
 
         const effectiveLimit = Math.max(1, params.limit ?? DEFAULT_GREP_LIMIT);
-        const searchBase = resolveSearchBase(params.path);
         const includeIgnored = params.includeIgnored === true;
 
-        // Build combined constraints from pathConstraint + exclude + explicit constraints
-        const constraintParts: string[] = [];
-        if (searchBase.pathConstraint) constraintParts.push(searchBase.pathConstraint);
-        constraintParts.push(...normalizeExcludes(params.exclude, searchBase.basePath));
-        if (params.constraints) constraintParts.push(params.constraints);
-        const effectiveConstraints = constraintParts.join(" ");
+        // Group paths by resolved basePath; each group runs one multiGrep call
+        const baseGroups = new Map<string, string[]>();
+        const mgScopePrefixes = new Map<string, string>();
+        if (mgPaths.length === 0) {
+          baseGroups.set(activeCwd, []);
+        } else {
+          for (const p of mgPaths) {
+            const { basePath, pathConstraint, scopePrefix } = resolveSearchBase(p, activeCwd);
+            const key = basePath;
+            if (!baseGroups.has(key)) baseGroups.set(key, []);
+            if (pathConstraint) baseGroups.get(key)!.push(pathConstraint);
+            // Track scopePrefix for space-path post-filtering
+            if (scopePrefix) {
+              if (!mgScopePrefixes.has(key)) mgScopePrefixes.set(key, scopePrefix);
+            }
+          }
+        }
 
-        const grepResult = await withFinderLease(
-          searchBase.basePath,
-          (finder) =>
+        // Resolve: when a group has path constraints, combine them with exclude + explicit constraints
+        const mgResults: GrepResult[] = [];
+        for (const [basePath, pathConstraints] of baseGroups) {
+          const parts: string[] = [];
+          for (const pc of pathConstraints) {
+            const normalized = normalizePathConstraint(pc, basePath);
+            if (normalized) parts.push(normalized);
+          }
+          parts.push(...normalizeExcludes(params.exclude, basePath));
+          if (params.constraints) parts.push(params.constraints);
+          const effectiveConstraints = parts.join(" ");
+
+          const r = await withFinderLease(basePath, (finder) =>
             finder.multiGrep({
               patterns: params.patterns,
               constraints: effectiveConstraints,
@@ -1360,15 +1343,22 @@ export default function fffExtension(pi: ExtensionAPI) {
               beforeContext: params.context ?? 0,
               afterContext: params.context ?? 0,
               classifyDefinitions: true,
-            }),
-          includeIgnored,
-        );
+            }), includeIgnored);
+          if (!r.ok) throw new Error(r.error);
+          // Apply scopePrefix filtering for space-paths resolved to git root
+          if (mgScopePrefixes.has(basePath)) {
+            const prefix = mgScopePrefixes.get(basePath)!;
+            const filtered = r.value.items.filter((m) => m.relativePath.startsWith(prefix));
+            mgResults.push({ ...r.value, items: filtered, totalMatched: filtered.length });
+          } else {
+            mgResults.push(r.value);
+          }
+          // Cursor: only run first scope
+          if (params.cursor) break;
+        }
 
-        if (!grepResult.ok) throw new Error(grepResult.error);
-
-        const result = grepResult.value;
+        const result = mergeGrepResults(mgResults);
         if (result.items.length === 0) {
-          if (result.regexFallbackError) throw new Error(result.regexFallbackError);
           throw new Error("No matches found");
         }
 
