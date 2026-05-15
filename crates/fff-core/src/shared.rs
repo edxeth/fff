@@ -315,10 +315,15 @@ impl SharedFrecency {
         since = "0.7.0",
         note = "GC is now auto-spawned by init(); this method is a no-op"
     )]
-    pub fn spawn_gc(&self, _db_path: String) -> std::result::Result<std::thread::JoinHandle<()>, Error> {
+    pub fn spawn_gc(
+        &self,
+        _db_path: String,
+    ) -> std::result::Result<std::thread::JoinHandle<()>, Error> {
         // GC is already spawned by init(). Return a dummy handle.
-        Ok(std::thread::spawn(|| loop {
-            std::thread::sleep(Duration::from_secs(u64::MAX));
+        Ok(std::thread::spawn(|| {
+            loop {
+                std::thread::sleep(Duration::from_secs(u64::MAX));
+            }
         }))
     }
 
