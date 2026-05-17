@@ -361,6 +361,24 @@ function createFffMentionProvider(
 // https://github.com/badlogic/pi-mono/issues/3935
 
 // ---------------------------------------------------------------------------
+// Render helpers — defensive normalization for renderCall/renderResult
+// ---------------------------------------------------------------------------
+
+// Normalize `args.path` for display: string, string[], or undefined → safe string.
+// Prevents renderCall from throwing when pi passes a scalar path.
+export function formatRenderPath(path: unknown): string {
+	if (Array.isArray(path)) return path.length > 0 ? path.join(", ") : ".";
+	if (typeof path === "string" && path.length > 0) return path;
+	return ".";
+}
+
+// Normalize `args.patterns` for display: must be string[]. Never throws.
+export function formatRenderPatterns(patterns: unknown): string[] {
+	if (Array.isArray(patterns)) return patterns.filter((p): p is string => typeof p === "string");
+	return [];
+}
+
+// ---------------------------------------------------------------------------
 // Extension
 // ---------------------------------------------------------------------------
 
@@ -762,7 +780,8 @@ export default function fffExtension(pi: ExtensionAPI) {
     async execute(_toolCallId, params, signal) {
       if (signal?.aborted) throw new Error("Operation aborted");
 
-      const paths = params.path ?? [];
+      const rawPaths = params.path ?? [];
+      const paths = Array.isArray(rawPaths) ? rawPaths : typeof rawPaths === "string" ? [rawPaths] : [];
       const invalidPath = paths.length > 0 ? invalidPathMessage(paths) : null;
       if (invalidPath) throw new Error(invalidPath);
 
@@ -889,7 +908,7 @@ export default function fffExtension(pi: ExtensionAPI) {
     renderCall(args, theme, context) {
       const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
       const pattern = args?.pattern ?? "";
-      const path = args?.path?.join(", ") ?? ".";
+      const path = formatRenderPath(args?.path);
       let content =
         theme.fg("toolTitle", theme.bold(toolNames.grep)) +
         " " +
@@ -965,7 +984,8 @@ export default function fffExtension(pi: ExtensionAPI) {
       // Resume from a prior cursor if supplied — cursor owns basePath+query+pageSize
       // so the agent can't accidentally mix patterns across pages.
       const resumed = params.cursor ? getFindCursor(params.cursor) : undefined;
-      const paths = !params.cursor ? (params.path ?? []) : [];
+      const rawPaths = !params.cursor ? (params.path ?? []) : [];
+      const paths = Array.isArray(rawPaths) ? rawPaths : typeof rawPaths === "string" ? [rawPaths] : [];
       const invalidPath =
         !params.cursor && paths.length > 0 ? invalidPathMessage(paths) : null;
       if (invalidPath) throw new Error(invalidPath);
@@ -1016,14 +1036,13 @@ export default function fffExtension(pi: ExtensionAPI) {
         }
         result = mergeFindResults(results);
       } else if (paths.length <= 1) {
-        // Fast path: single scope (or resumed cursor with first scope)
+        // Fast path: single scope
         const scope = scopes[0] ?? { basePath, query: buildQuery([], pattern, params.exclude, basePath) };
-        const scopeInfo = resumed?.scopes[0];
         const searchResult = await withFinderLease(
-          scopeInfo?.basePath ?? scope.basePath,
+          scope.basePath,
           (finder) =>
-            finder.fileSearch(resumed ? scopeInfo!.query : scope.query, {
-              pageIndex: resumed ? scopeInfo!.nextPageIndex : 0,
+            finder.fileSearch(scope.query, {
+              pageIndex: 0,
               pageSize: effectiveLimit,
             }),
           includeIgnored,
@@ -1213,7 +1232,7 @@ export default function fffExtension(pi: ExtensionAPI) {
     renderCall(args, theme, context) {
       const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
       const pattern = args?.pattern ?? "";
-      const path = args?.path?.join(", ") ?? ".";
+      const path = formatRenderPath(args?.path);
       let content =
         theme.fg("toolTitle", theme.bold(toolNames.find)) +
         " " +
@@ -1293,7 +1312,8 @@ export default function fffExtension(pi: ExtensionAPI) {
         if (signal?.aborted) throw new Error("Operation aborted");
         if (!params.patterns?.length)
           throw new Error("patterns array must have at least 1 element");
-        const mgPaths = params.path ?? [];
+        const rawMgPaths = params.path ?? [];
+        const mgPaths = Array.isArray(rawMgPaths) ? rawMgPaths : typeof rawMgPaths === "string" ? [rawMgPaths] : [];
         const invalidPath = mgPaths.length > 0 ? invalidPathMessage(mgPaths) : null;
         if (invalidPath) throw new Error(invalidPath);
 
@@ -1384,7 +1404,7 @@ export default function fffExtension(pi: ExtensionAPI) {
 
       renderCall(args, theme, context) {
         const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-        const patterns = args?.patterns ?? [];
+        const patterns = formatRenderPatterns(args?.patterns);
         const constraints = args?.constraints;
         let content =
           theme.fg("toolTitle", theme.bold(toolNames.multiGrep)) +
