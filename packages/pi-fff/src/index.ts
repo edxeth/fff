@@ -5,9 +5,6 @@
  * @-mention autocomplete suggestions in the interactive editor.
  */
 
-import { execSync } from "node:child_process";
-import fs from "node:fs";
-import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import {
@@ -27,7 +24,22 @@ import type {
   SearchResult,
 } from "@edxeth/fff-node";
 import { FileFinder } from "@edxeth/fff-node";
-import { buildQuery, buildSearchScopes, invalidPathMessage, normalizeExcludes, normalizePathConstraint, mergeGrepResults, mergeFindResults, resolveSearchBase, type SearchScope } from "./query";
+import {
+  buildQuery,
+  buildSearchScopes,
+  invalidPathMessage,
+  normalizeExcludes,
+  normalizePathConstraint,
+  mergeGrepResults,
+  mergeFindResults,
+  resolveSearchBase,
+} from "./query";
+import {
+  getFindSourceSearchNotice,
+  getMultiGrepPhraseMissNotice,
+  getRegexAlternationNotice,
+  shouldShowRegexAlternationNotice,
+} from "./regex-diagnostics";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -217,7 +229,9 @@ function formatGrepOutput(result: GrepResult): string {
       }
     }
 
-    lines.push(` ${patternPrefix}${match.lineNumber}: ${truncateLine(match.lineContent)}`);
+    lines.push(
+      ` ${patternPrefix}${match.lineNumber}: ${truncateLine(match.lineContent)}`,
+    );
     _shown++;
 
     match.contextAfter?.forEach((line: string, i: number) => {
@@ -267,8 +281,8 @@ function patternLooksLikePath(pattern: string): boolean {
   return /[\\/]|[*?[{]/.test(pattern);
 }
 
-function pathLikePatternMessage(_pattern: string): string {
-  return "Path/glob belongs in path, not pattern";
+function pathLikePatternMessage(pattern: string): string {
+  return `Path/glob belongs in path, not pattern. Use pattern: "" with path: ["${pattern}"] to list or scope files.`;
 }
 
 function formatFindOutput(
@@ -367,15 +381,16 @@ function createFffMentionProvider(
 // Normalize `args.path` for display: string, string[], or undefined → safe string.
 // Prevents renderCall from throwing when pi passes a scalar path.
 export function formatRenderPath(path: unknown): string {
-	if (Array.isArray(path)) return path.length > 0 ? path.join(", ") : ".";
-	if (typeof path === "string" && path.length > 0) return path;
-	return ".";
+  if (Array.isArray(path)) return path.length > 0 ? path.join(", ") : ".";
+  if (typeof path === "string" && path.length > 0) return path;
+  return ".";
 }
 
 // Normalize `args.patterns` for display: must be string[]. Never throws.
 export function formatRenderPatterns(patterns: unknown): string[] {
-	if (Array.isArray(patterns)) return patterns.filter((p): p is string => typeof p === "string");
-	return [];
+  if (Array.isArray(patterns))
+    return patterns.filter((p): p is string => typeof p === "string");
+  return [];
 }
 
 // ---------------------------------------------------------------------------
@@ -424,11 +439,6 @@ export default function fffExtension(pi: ExtensionAPI) {
     return currentMode !== "tools-only";
   }
 
-
-
-
-
-
   async function noResultsMessage(
     base: string,
     basePath: string,
@@ -449,8 +459,6 @@ export default function fffExtension(pi: ExtensionAPI) {
     }
     return base;
   }
-
-
 
   function finderKey(basePath: string, includeIgnored: boolean): string {
     return `${includeIgnored ? "ignored" : "normal"}:${basePath}`;
@@ -647,8 +655,7 @@ export default function fffExtension(pi: ExtensionAPI) {
   }) {
     if (!shouldEnableMentions()) return;
     ctx.ui.setEditorComponent(
-      (tui: any, theme: any, keybindings: any) =>
-        new FffEditor(tui, theme, keybindings),
+      (tui: any, theme: any, keybindings: any) => new FffEditor(tui, theme, keybindings),
     );
   }
 
@@ -688,7 +695,6 @@ export default function fffExtension(pi: ExtensionAPI) {
 
   // ── Multi-path search helpers ──
 
-
   // --- Shared render helpers ---
 
   const renderTextResult = (
@@ -722,7 +728,8 @@ export default function fffExtension(pi: ExtensionAPI) {
 
   const grepSchema = Type.Object({
     pattern: Type.String({
-      description: "Search pattern (literal text or regex)",
+      description:
+        "One precise literal or narrowly scoped regex. If the request names several exact terms, use multi_grep instead. Regex alternatives are unanchored and can flood results.",
     }),
     path: Type.Optional(
       Type.Array(Type.String(), {
@@ -764,15 +771,19 @@ export default function fffExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: toolNames.grep,
     label: toolNames.grep,
-    description: `Grep file contents. Smart-case, auto-detects regex vs literal, git-aware. Results are ranked by frecency (most-accessed files first); matches within a file stay in source order. Default limit ${DEFAULT_GREP_LIMIT}.`,
-    promptSnippet: "Grep contents",
+    description: `Search file contents for one precise pattern. Smart-case, auto-detects regex vs literal, git-aware. Use multi_grep when the request lists exact terms. Default limit ${DEFAULT_GREP_LIMIT}.`,
+    promptSnippet: "Search content for one precise pattern",
     promptGuidelines: [
       "Use for content, not paths.",
-      "Use one literal identifier or phrase first; regex only when needed.",
+      "Use one precise literal identifier or phrase first; regex only when structure matters.",
+      "If the user gives a list of exact symbols, methods, classes, or terms, use multi_grep instead of repeated grep calls.",
+      "Do not combine broad concepts into one OR regex. Split broad searches or scope them with path.",
+      "Regex alternatives are substring matches unless anchored. Prefer \\bfoo\\b or class\\s+\\w*Widget over foo|Widget.",
       "Use path to scope searches by directory, file, or glob. Multiple paths search as OR: path: ['src/', 'tests/'].",
       "Set includeIgnored only when intentionally searching ignored files such as node_modules or build output.",
       "Set caseSensitive: true only when exact case matters; otherwise smart-case applies.",
-      "Use multi_grep for 2-6 literal identifiers or naming variants; grep regex alternation is OK for a simple 2-way OR.",
+      "Use multi_grep for 2-6 exact identifiers or naming variants instead of regex alternation.",
+      "Avoid broad unanchored terms unless scoped by path, paired with context, or bounded with word boundaries.",
       "After 1-2 greps, read the best match instead of widening search.",
     ],
     parameters: grepSchema,
@@ -781,14 +792,19 @@ export default function fffExtension(pi: ExtensionAPI) {
       if (signal?.aborted) throw new Error("Operation aborted");
 
       const rawPaths = params.path ?? [];
-      const paths = Array.isArray(rawPaths) ? rawPaths : typeof rawPaths === "string" ? [rawPaths] : [];
+      const paths = Array.isArray(rawPaths)
+        ? rawPaths
+        : typeof rawPaths === "string"
+          ? [rawPaths]
+          : [];
       const invalidPath = paths.length > 0 ? invalidPathMessage(paths) : null;
       if (invalidPath) throw new Error(invalidPath);
 
       const scopes = buildSearchScopes(paths, params.pattern, params.exclude, activeCwd);
       const effectiveLimit = Math.max(1, params.limit ?? DEFAULT_GREP_LIMIT);
       const storedCursor = params.cursor ? getCursor(params.cursor) : undefined;
-      const includeIgnored = storedCursor?.includeIgnored ?? params.includeIgnored === true;
+      const includeIgnored =
+        storedCursor?.includeIgnored ?? params.includeIgnored === true;
 
       // Auto-detect: regex if the pattern has regex metacharacters AND parses
       // as a valid regex, otherwise plain literal. The fuzzy fallback below
@@ -843,12 +859,22 @@ export default function fffExtension(pi: ExtensionAPI) {
 
       const grepResults: GrepResult[] = [];
       for (const scope of scopes) {
-        const r = await withFinderLease(scope.basePath, (finder) => finder.grep(scope.query, grepOptions), includeIgnored);
+        const r = await withFinderLease(
+          scope.basePath,
+          (finder) => finder.grep(scope.query, grepOptions),
+          includeIgnored,
+        );
         if (!r.ok) throw new Error(r.error);
         // Apply scopePrefix: keep only files under the space-containing directory
         if (scope.scopePrefix) {
-          const filtered = r.value.items.filter((m) => m.relativePath.startsWith(scope.scopePrefix!));
-          grepResults.push({ ...r.value, items: filtered, totalMatched: filtered.length });
+          const filtered = r.value.items.filter((m) =>
+            m.relativePath.startsWith(scope.scopePrefix!),
+          );
+          grepResults.push({
+            ...r.value,
+            items: filtered,
+            totalMatched: filtered.length,
+          });
         } else {
           grepResults.push(r.value);
         }
@@ -868,8 +894,12 @@ export default function fffExtension(pi: ExtensionAPI) {
       ) {
         const fuzzyResults: GrepResult[] = [];
         for (const scope of scopes) {
-          const r = await withFinderLease(scope.basePath, (finder) =>
-            finder.grep(scope.query, { ...grepOptions, mode: "fuzzy", cursor: null }), includeIgnored);
+          const r = await withFinderLease(
+            scope.basePath,
+            (finder) =>
+              finder.grep(scope.query, { ...grepOptions, mode: "fuzzy", cursor: null }),
+            includeIgnored,
+          );
           if (r.ok && r.value.items.length > 0) fuzzyResults.push(r.value);
         }
         if (fuzzyResults.length > 0) {
@@ -878,18 +908,34 @@ export default function fffExtension(pi: ExtensionAPI) {
         }
       }
 
-      if (result.items.length === 0 && scopes.length > 0)
-        throw new Error(
-          await noResultsMessage("No matches found", scopes[0].basePath, paths[0], includeIgnored),
-        );
-
       let output = formatGrepOutput(result);
       const notices: string[] = [];
+      if (result.items.length === 0 && scopes.length > 0) {
+        const noResults = await noResultsMessage(
+          "No matches found",
+          scopes[0].basePath,
+          paths[0],
+          includeIgnored,
+        );
+        if (noResults !== "No matches found") notices.push(noResults);
+      }
+      const regexAlternationNotice =
+        mode === "regex" &&
+        shouldShowRegexAlternationNotice(
+          result.items,
+          effectiveLimit,
+          result.nextCursor !== null,
+        )
+          ? getRegexAlternationNotice(params.pattern)
+          : null;
+      if (regexAlternationNotice) notices.push(regexAlternationNotice);
       if (result.regexFallbackError) {
         notices.push(`Invalid regex: ${result.regexFallbackError}, used literal match`);
       }
       if (result.nextCursor) {
-        notices.push(`Continue with cursor="${storeCursor(result.nextCursor, includeIgnored)}"`);
+        notices.push(
+          `Continue with cursor="${storeCursor(result.nextCursor, includeIgnored)}"`,
+        );
       }
       if (includeIgnored) notices.unshift("ignored files included");
 
@@ -931,7 +977,7 @@ export default function fffExtension(pi: ExtensionAPI) {
   const findSchema = Type.Object({
     pattern: Type.String({
       description:
-        "Fuzzy filename search and glob search. Frecency-ranked, git-aware. Multi-word = narrower (AND) not bound to order, use for multi word related concept search. Prefer this over ls/find/bash as the first exploration step whenever the user names a concept, feature, or symbol — it surfaces the relevant files in one call. Only use ls/read on a directory when you specifically need the alphabetical layout of an unknown repo, or when a concept search returned nothing.",
+        "Fuzzy filename/path query only, not code symbol search. Use an empty string when path already contains an exact directory, file, or glob. Frecency-ranked, git-aware. Multi-word = narrower (AND) not bound to order.",
     }),
     path: Type.Optional(
       Type.Array(Type.String(), {
@@ -964,15 +1010,16 @@ export default function fffExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: toolNames.find,
     label: toolNames.find,
-    description: `Fuzzy path search and glob search. Matches against the whole repo-relative path, not just the filename. Frecency-ranked, git-aware. Multi-word = narrower (AND). Default limit ${DEFAULT_FIND_LIMIT}.`,
-    promptSnippet: "Find files by path or glob",
+    description: `Fuzzy file/path search, not source symbol search. Exact directories, files, and globs belong in path, not pattern. Matches against the whole repo-relative path. Frecency-ranked, git-aware. Default limit ${DEFAULT_FIND_LIMIT}.`,
+    promptSnippet: "Find files by fuzzy path query",
     promptGuidelines: [
       "Use for paths, not content; use grep for content.",
+      "Do not use find for methods, classes, constants, or UI verbs unless they are likely file names; use grep or multi_grep for source symbols.",
       "Pattern is fuzzy over the whole repo-relative path, not just the basename.",
       "Keep pattern to 1-2 terms; extra words narrow results.",
       "Put exact paths, directories, and globs in path, not pattern, e.g. path: ['**/profile.h'].",
       "Multiple paths search as OR: path: ['src/', 'tests/'].",
-      "For directory contents, use path: ['dir/**'] with pattern: '' or '*'.",
+      "For directory contents, use pattern: '' with path: ['dir/**']; do not use pattern: '*'.",
       "Use exclude to cut noise, e.g. 'test/,*.min.js'.",
       "Set includeIgnored only when intentionally searching ignored files such as node_modules or build output.",
     ],
@@ -985,13 +1032,21 @@ export default function fffExtension(pi: ExtensionAPI) {
       // so the agent can't accidentally mix patterns across pages.
       const resumed = params.cursor ? getFindCursor(params.cursor) : undefined;
       const rawPaths = !params.cursor ? (params.path ?? []) : [];
-      const paths = Array.isArray(rawPaths) ? rawPaths : typeof rawPaths === "string" ? [rawPaths] : [];
+      const paths = Array.isArray(rawPaths)
+        ? rawPaths
+        : typeof rawPaths === "string"
+          ? [rawPaths]
+          : [];
       const invalidPath =
         !params.cursor && paths.length > 0 ? invalidPathMessage(paths) : null;
       if (invalidPath) throw new Error(invalidPath);
 
       const scopes = resumed
-        ? resumed.scopes.map((s) => ({ basePath: s.basePath, query: s.query, scopePrefix: s.scopePrefix }))
+        ? resumed.scopes.map((s) => ({
+            basePath: s.basePath,
+            query: s.query,
+            scopePrefix: s.scopePrefix,
+          }))
         : buildSearchScopes(paths, params.pattern, params.exclude, activeCwd);
       const effectiveLimit = resumed
         ? resumed.pageSize
@@ -1010,11 +1065,15 @@ export default function fffExtension(pi: ExtensionAPI) {
         // Resume: iterate all cursor scopes, merge results
         const results: SearchResult[] = [];
         for (const scopeInfo of resumed.scopes) {
-          const r = await withFinderLease(scopeInfo.basePath, (finder) =>
-            finder.fileSearch(scopeInfo.query, {
-              pageIndex: scopeInfo.nextPageIndex,
-              pageSize: effectiveLimit,
-            }), includeIgnored);
+          const r = await withFinderLease(
+            scopeInfo.basePath,
+            (finder) =>
+              finder.fileSearch(scopeInfo.query, {
+                pageIndex: scopeInfo.nextPageIndex,
+                pageSize: effectiveLimit,
+              }),
+            includeIgnored,
+          );
           if (!r.ok) throw new Error(r.error);
           // Apply scopePrefix for space-paths resolved to git root
           if (scopeInfo.scopePrefix && r.value.items.length > 0) {
@@ -1037,7 +1096,10 @@ export default function fffExtension(pi: ExtensionAPI) {
         result = mergeFindResults(results);
       } else if (paths.length <= 1) {
         // Fast path: single scope
-        const scope = scopes[0] ?? { basePath, query: buildQuery([], pattern, params.exclude, basePath) };
+        const scope = scopes[0] ?? {
+          basePath,
+          query: buildQuery([], pattern, params.exclude, basePath),
+        };
         const searchResult = await withFinderLease(
           scope.basePath,
           (finder) =>
@@ -1054,8 +1116,12 @@ export default function fffExtension(pi: ExtensionAPI) {
         const results: SearchResult[] = [];
         let anyScopeFull = false;
         for (const scope of scopes) {
-          const r = await withFinderLease(scope.basePath, (finder) =>
-            finder.fileSearch(scope.query, { pageIndex: 0, pageSize: effectiveLimit }), includeIgnored);
+          const r = await withFinderLease(
+            scope.basePath,
+            (finder) =>
+              finder.fileSearch(scope.query, { pageIndex: 0, pageSize: effectiveLimit }),
+            includeIgnored,
+          );
           if (r.ok) {
             anyScopeFull = anyScopeFull || r.value.items.length >= effectiveLimit;
             // Apply scopePrefix: keep only files under the space-containing directory
@@ -1084,7 +1150,12 @@ export default function fffExtension(pi: ExtensionAPI) {
         }
       }
       // Space-in-pattern fallback: only for single-scope searches
-      if (result.items.length === 0 && /\s/.test(pattern.trim()) && !resumed && paths.length <= 1) {
+      if (
+        result.items.length === 0 &&
+        /\s/.test(pattern.trim()) &&
+        !resumed &&
+        paths.length <= 1
+      ) {
         const scope = scopes[0] ?? { basePath, query: "" };
         const scopedQuery = buildQuery(paths, "", params.exclude, scope.basePath);
         const fallback = await withFinderLease(
@@ -1174,21 +1245,29 @@ export default function fffExtension(pi: ExtensionAPI) {
         }
       }
 
-      if (result.items.length === 0)
-        throw new Error(
-          await noResultsMessage("No files found matching pattern", basePath, paths[0], includeIgnored),
-        );
-
       const formatted = formatFindOutput(result, effectiveLimit, pattern);
       let output = formatted.output;
 
       // Infer hasMore for single-scope (multi-scope tracked in search block above).
       if (!resumed && !hasMore) {
         const shownSoFar = pageIndex * effectiveLimit + result.items.length;
-        hasMore = result.items.length >= effectiveLimit && (result.totalMatched ?? result.items.length) > shownSoFar;
+        hasMore =
+          result.items.length >= effectiveLimit &&
+          (result.totalMatched ?? result.items.length) > shownSoFar;
       }
 
       const notices: string[] = [];
+      if (result.items.length === 0) {
+        const noResults = await noResultsMessage(
+          "No files found matching pattern",
+          basePath,
+          paths[0],
+          includeIgnored,
+        );
+        if (noResults !== "No files found matching pattern") notices.push(noResults);
+      }
+      const sourceSearchNotice = getFindSourceSearchNotice(pattern);
+      if (sourceSearchNotice) notices.push(sourceSearchNotice);
       if (formatted.weak && formatted.shownCount > 0)
         notices.push(
           `Query "${pattern}" produced only weak scattered fuzzy matches. Output capped at ${formatted.shownCount}/${result.totalMatched}.`,
@@ -1197,8 +1276,14 @@ export default function fffExtension(pi: ExtensionAPI) {
       if (formatted.literalTailSuppressed && hiddenFuzzyMatches >= 1000)
         notices.push(`${formatted.shownCount} exact matches shown. Fuzzy tail hidden`);
 
-      if (!formatted.weak && !formatted.literalTailSuppressed && hasMore && !regexFallbackUsed) {
-        const remaining = result.totalMatched - (pageIndex * effectiveLimit + result.items.length);
+      if (
+        !formatted.weak &&
+        !formatted.literalTailSuppressed &&
+        hasMore &&
+        !regexFallbackUsed
+      ) {
+        const remaining =
+          result.totalMatched - (pageIndex * effectiveLimit + result.items.length);
         const cursorId = storeFindCursor({
           scopes: scopes.map((s) => ({
             basePath: s.basePath,
@@ -1213,7 +1298,9 @@ export default function fffExtension(pi: ExtensionAPI) {
         notices.push(`${remaining} more. Next page: find cursor="${cursorId}"`);
       }
       if (regexFallbackUsed) {
-        notices.push(`Regex alternation (|) in pattern treated as ${regexFallbackAlts.length} searches: ${regexFallbackAlts.map((s) => `"${s}"`).join(", ")}`);
+        notices.push(
+          `Regex alternation (|) in pattern treated as ${regexFallbackAlts.length} searches: ${regexFallbackAlts.map((s) => `"${s}"`).join(", ")}`,
+        );
       }
       if (includeIgnored) notices.unshift("ignored files included");
 
@@ -1258,7 +1345,7 @@ export default function fffExtension(pi: ExtensionAPI) {
     const multiGrepSchema = Type.Object({
       patterns: Type.Array(Type.String(), {
         description:
-          "Literal patterns (OR). Include snake_case/camelCase/PascalCase variants.",
+          "Exact literal patterns (OR), not regex. Include snake_case/camelCase/PascalCase variants.",
         minItems: 1,
         maxItems: 20,
       }),
@@ -1296,12 +1383,15 @@ export default function fffExtension(pi: ExtensionAPI) {
       name: toolNames.multiGrep,
       label: toolNames.multiGrep,
       description:
-        "Search file contents for ANY of multiple literal patterns (OR logic). Faster than regex alternation for literal text.",
-      promptSnippet: "Multi-pattern OR content search",
+        "Search file contents for ANY of multiple exact literal patterns (OR logic). Use this when the request lists concrete identifiers/terms; not for regex structure.",
+      promptSnippet: "Search exact literal alternatives",
       promptGuidelines: [
-        "Use for content searches with 2-6 literal identifiers or naming variants.",
-        "Patterns are ORed literals, not regexes or globs.",
-        "Do not use for broad concepts or unrelated keywords; run separate searches instead.",
+        "Use for content searches with 2-10 exact identifiers, method/class names, UI verbs, or naming variants.",
+        "When a prompt lists several exact terms to inspect, this should usually be the first content search.",
+        "For classes/types/functions, search bare names first (Widget), not phrases (class Widget); use grep regex when structure matters.",
+        "Prefer this over grep regex alternation when each pattern is a concrete string.",
+        "Patterns are ORed literals, not regexes or globs; use grep for class\\s+\\w*Widget-style structure.",
+        "Do not use for broad concepts or unrelated keywords; run separate scoped searches instead.",
         "Use constraints for file filters, e.g. '*.{ts,tsx} !test/'.",
         "Output tags each match with the pattern index.",
         "Set includeIgnored only when intentionally searching ignored files such as node_modules or build output.",
@@ -1313,7 +1403,11 @@ export default function fffExtension(pi: ExtensionAPI) {
         if (!params.patterns?.length)
           throw new Error("patterns array must have at least 1 element");
         const rawMgPaths = params.path ?? [];
-        const mgPaths = Array.isArray(rawMgPaths) ? rawMgPaths : typeof rawMgPaths === "string" ? [rawMgPaths] : [];
+        const mgPaths = Array.isArray(rawMgPaths)
+          ? rawMgPaths
+          : typeof rawMgPaths === "string"
+            ? [rawMgPaths]
+            : [];
         const invalidPath = mgPaths.length > 0 ? invalidPathMessage(mgPaths) : null;
         if (invalidPath) throw new Error(invalidPath);
 
@@ -1327,7 +1421,10 @@ export default function fffExtension(pi: ExtensionAPI) {
           baseGroups.set(activeCwd, []);
         } else {
           for (const p of mgPaths) {
-            const { basePath, pathConstraint, scopePrefix } = resolveSearchBase(p, activeCwd);
+            const { basePath, pathConstraint, scopePrefix } = resolveSearchBase(
+              p,
+              activeCwd,
+            );
             const key = basePath;
             if (!baseGroups.has(key)) baseGroups.set(key, []);
             if (pathConstraint) baseGroups.get(key)!.push(pathConstraint);
@@ -1350,23 +1447,33 @@ export default function fffExtension(pi: ExtensionAPI) {
           if (params.constraints) parts.push(params.constraints);
           const effectiveConstraints = parts.join(" ");
 
-          const r = await withFinderLease(basePath, (finder) =>
-            finder.multiGrep({
-              patterns: params.patterns,
-              constraints: effectiveConstraints,
-              maxMatchesPerFile: Math.min(effectiveLimit, 50),
-              smartCase: true,
-              cursor: (params.cursor ? getCursor(params.cursor)?.cursor : null) ?? null,
-              beforeContext: params.context ?? 0,
-              afterContext: params.context ?? 0,
-              classifyDefinitions: true,
-            }), includeIgnored);
+          const r = await withFinderLease(
+            basePath,
+            (finder) =>
+              finder.multiGrep({
+                patterns: params.patterns,
+                constraints: effectiveConstraints,
+                maxMatchesPerFile: Math.min(effectiveLimit, 50),
+                smartCase: true,
+                cursor: (params.cursor ? getCursor(params.cursor)?.cursor : null) ?? null,
+                beforeContext: params.context ?? 0,
+                afterContext: params.context ?? 0,
+                classifyDefinitions: true,
+              }),
+            includeIgnored,
+          );
           if (!r.ok) throw new Error(r.error);
           // Apply scopePrefix filtering for space-paths resolved to git root
           if (mgScopePrefixes.has(basePath)) {
             const prefix = mgScopePrefixes.get(basePath)!;
-            const filtered = r.value.items.filter((m) => m.relativePath.startsWith(prefix));
-            mgResults.push({ ...r.value, items: filtered, totalMatched: filtered.length });
+            const filtered = r.value.items.filter((m) =>
+              m.relativePath.startsWith(prefix),
+            );
+            mgResults.push({
+              ...r.value,
+              items: filtered,
+              totalMatched: filtered.length,
+            });
           } else {
             mgResults.push(r.value);
           }
@@ -1375,13 +1482,13 @@ export default function fffExtension(pi: ExtensionAPI) {
         }
 
         const result = mergeGrepResults(mgResults);
-        if (result.items.length === 0) {
-          throw new Error("No matches found");
-        }
-
         let output = formatGrepOutput(result);
 
         const notices: string[] = [];
+        if (result.items.length === 0) {
+          const phraseMissNotice = getMultiGrepPhraseMissNotice(params.patterns);
+          if (phraseMissNotice) notices.push(phraseMissNotice);
+        }
         if (result.items.length >= effectiveLimit)
           notices.push(`${effectiveLimit}+ matches (refine patterns)`);
         if (result.nextCursor)
