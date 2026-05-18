@@ -9,7 +9,6 @@ A [pi](https://github.com/badlogic/pi-mono) extension that replaces the built-in
 | `find` (spawns `fd`) | `fffind` (FFF `fileSearch`) | Fuzzy matching, frecency ranking, git-aware, pre-indexed |
 | `grep` (spawns `rg`) | `ffgrep` (FFF `grep`) | SIMD-accelerated, frecency-ordered, mmap-cached, no subprocess |
 | *(none)* | `fff-multi-grep` (FFF `multiGrep`) | OR-logic multi-pattern search via Aho-Corasick |
-| `@` file autocomplete (fd-backed) | `@` file autocomplete (FFF-backed, default) | Fuzzy ranking from FFF index/frecency |
 
 ### Key advantages over built-in tools
 
@@ -122,9 +121,11 @@ Parameters:
 
 ## Modes
 
-- `tools-and-ui` (default): registers `fffind`, `ffgrep`, `fff-multi-grep` as additional tools + FFF-backed `@` autocomplete
-- `tools-only`: additional tools only; keep pi's default `@` autocomplete
-- `override`: replaces pi's built-in `find`, `grep` and adds `multi_grep` + FFF-backed `@` autocomplete
+FFF only registers tools, never replaces the editor.
+
+- `tools-and-ui` (default): registers `fffind`, `ffgrep`, `fff-multi-grep` as additional tools
+- `tools-only`: same as `tools-and-ui` (kept as an alias for backwards compatibility)
+- `override`: replaces pi's built-in `find`, `grep` and adds `multi_grep`
 
 Mode precedence:
 1. `--fff-mode <mode>` CLI flag

@@ -84,16 +84,17 @@ INSTALL ~
 
 MODES ~
 
-Three operating modes, switchable at runtime with `/fff-mode`:
+Three operating modes, switchable at runtime with `/fff-mode`. FFF only
+registers tools.
 
   -----------------------------------------------------------------------
   Mode             What it does
   ---------------- ------------------------------------------------------
-  tools-and-ui     Adds ffgrep and fffind tools, replaces @-mention
-  (default)        autocomplete with FFF.
+  tools-and-ui     Adds ffgrep and fffind tools alongside pi’s built-ins.
+  (default)
 
-  tools-only       Only tool injection. Keeps pi’s native editor
-                   autocomplete.
+  tools-only       Same as tools-and-ui (kept as an alias for backwards
+                   compatibility).
 
   override         Replaces pi’s built-in grep, find, and multi_grep with
                    FFF implementations.
@@ -116,9 +117,7 @@ COMMANDS ~
 
 Source: `packages/pi-fff/` <./packages/pi-fff/>.
 
-The Pi extension swaps pi’s native tools for FFF implementations and feeds
-the interactive editor’s `@`-mention autocomplete from the frecency-ranked
-index.
+The Pi extension swaps pi’s native tools for FFF implementations.
 
 Neovim plugin ~
 

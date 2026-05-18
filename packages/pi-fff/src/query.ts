@@ -1,5 +1,5 @@
 import path from "node:path";
-import type { GrepResult, SearchResult, Score } from "@edxeth/fff-node";
+import type { GrepResult, SearchResult } from "@edxeth/fff-node";
 
 export function mergeGrepResults(results: GrepResult[], scopePrefix?: string): GrepResult {
   if (results.length <= 1 && !scopePrefix)

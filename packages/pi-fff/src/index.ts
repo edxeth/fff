@@ -1,17 +1,11 @@
 /**
  * pi-fff: FFF-powered file search extension for pi
  *
- * Overrides built-in `find` and `grep` tools with FFF and can also replace
- * @-mention autocomplete suggestions in the interactive editor.
+ * Overrides built-in `find` and `grep` tools with FFF.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { CustomEditor } from "@earendil-works/pi-coding-agent";
-import {
-  Text,
-  type AutocompleteItem,
-  type AutocompleteProvider,
-} from "@earendil-works/pi-tui";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import type {
   GrepCursor,
@@ -19,7 +13,6 @@ import type {
   FileItem,
   GrepResult,
   InitOptions,
-  MixedItem,
   Score,
   SearchResult,
 } from "@edxeth/fff-node";
@@ -49,7 +42,6 @@ const DEFAULT_GREP_LIMIT = 20;
 const DEFAULT_FIND_LIMIT = 30;
 const MAX_CACHED_FINDERS = 4;
 const GREP_MAX_LINE_LENGTH = 500;
-const MENTION_MAX_RESULTS = 20;
 
 type FffMode = "tools-and-ui" | "tools-only" | "override";
 type FffInitOptions = InitOptions & { includeIgnored?: boolean };
@@ -328,53 +320,6 @@ function formatFindOutput(
 }
 
 // ---------------------------------------------------------------------------
-// Mention autocomplete helpers
-// ---------------------------------------------------------------------------
-
-function extractAtPrefix(textBeforeCursor: string): string | null {
-  const match = textBeforeCursor.match(/(?:^|[ \t])(@(?:"[^"]*|[^\s]*))$/);
-  return match?.[1] ?? null;
-}
-
-function buildAtCompletionValue(path: string): string {
-  return path.includes(" ") ? `@"${path}"` : `@${path}`;
-}
-
-function createFffMentionProvider(
-  getItems: (query: string, signal: AbortSignal) => Promise<AutocompleteItem[]>,
-): AutocompleteProvider {
-  return {
-    async getSuggestions(lines, cursorLine, cursorCol, options) {
-      const currentLine = lines[cursorLine] || "";
-      const prefix = extractAtPrefix(currentLine.slice(0, cursorCol));
-      if (!prefix || options.signal.aborted) return null;
-
-      const query = prefix.startsWith('@"') ? prefix.slice(2) : prefix.slice(1);
-      const items = await getItems(query, options.signal);
-      return options.signal.aborted || items.length === 0 ? null : { items, prefix };
-    },
-    applyCompletion(_lines, cursorLine, cursorCol, item, prefix) {
-      const currentLine = _lines[cursorLine] || "";
-      const before = currentLine.slice(0, cursorCol - prefix.length);
-      const after = currentLine.slice(cursorCol);
-      const newLine = before + item.value + after;
-      const newCursorCol = cursorCol - prefix.length + item.value.length;
-      return {
-        lines: [..._lines.slice(0, cursorLine), newLine, ..._lines.slice(cursorLine + 1)],
-        cursorLine,
-        cursorCol: newCursorCol,
-      };
-    },
-  };
-}
-
-// FffEditor is defined inside fffExtension() so it can capture `getMentionItems`
-// via closure rather than via a 4th constructor parameter. This makes the class
-// safe to subclass via `new SubClass(tui, theme, keybindings)` -- the pattern
-// pi-vim and pi-image-attachments use to compose editors. See:
-// https://github.com/badlogic/pi-mono/issues/3935
-
-// ---------------------------------------------------------------------------
 // Render helpers — defensive normalization for renderCall/renderResult
 // ---------------------------------------------------------------------------
 
@@ -433,10 +378,6 @@ export default function fffExtension(pi: ExtensionAPI) {
 
   function setMode(mode: FffMode): void {
     currentMode = mode;
-  }
-
-  function shouldEnableMentions(): boolean {
-    return currentMode !== "tools-only";
   }
 
   async function noResultsMessage(
@@ -564,101 +505,6 @@ export default function fffExtension(pi: ExtensionAPI) {
     return finder && !finder.isDestroyed ? finder : null;
   }
 
-  async function getMentionItems(
-    query: string,
-    signal: AbortSignal,
-  ): Promise<AutocompleteItem[]> {
-    if (signal.aborted) return [];
-    const result = await withFinderLease(activeCwd, (finder) => {
-      if (signal.aborted) return null;
-      return finder.mixedSearch(query, { pageSize: MENTION_MAX_RESULTS });
-    });
-    if (!result) return [];
-    if (!result.ok) return [];
-
-    return result.value.items.slice(0, MENTION_MAX_RESULTS).map((mixed: MixedItem) => {
-      if (mixed.type === "directory") {
-        return {
-          value: buildAtCompletionValue(mixed.item.relativePath),
-          label: mixed.item.dirName,
-          description: mixed.item.relativePath,
-        };
-      }
-      return {
-        value: buildAtCompletionValue(mixed.item.relativePath),
-        label: mixed.item.fileName,
-        description: mixed.item.relativePath,
-      };
-    });
-  }
-
-  // Editor wrapper that injects FFF @-mention autocomplete alongside base provider.
-  // Defined inside fffExtension() so the class methods capture `getMentionItems`
-  // via closure. Subclasses constructed as `new Sub(tui, theme, keybindings)` by
-  // composability wrappers (pi-vim, pi-image-attachments) still get a working
-  // mention provider because the closure binding is preserved across subclassing.
-  class FffEditor extends CustomEditor {
-    private baseProvider: AutocompleteProvider | undefined;
-
-    override setAutocompleteProvider(provider: AutocompleteProvider): void {
-      this.baseProvider = provider;
-      // Create composite provider that handles @-mentions and falls back to base
-      const mentionProvider = createFffMentionProvider(getMentionItems);
-      const compositeProvider: AutocompleteProvider = {
-        getSuggestions: async (lines, cursorLine, cursorCol, options) => {
-          // Try @-mention first
-          const mentionResult = await mentionProvider.getSuggestions(
-            lines,
-            cursorLine,
-            cursorCol,
-            options,
-          );
-          if (mentionResult) return mentionResult;
-          // Fall back to base provider
-          return (
-            this.baseProvider?.getSuggestions(lines, cursorLine, cursorCol, options) ??
-            null
-          );
-        },
-        applyCompletion: (lines, cursorLine, cursorCol, item, prefix) => {
-          // Let mention provider handle @ completions, base provider for others
-          if (prefix?.startsWith("@")) {
-            return mentionProvider.applyCompletion!(
-              lines,
-              cursorLine,
-              cursorCol,
-              item,
-              prefix,
-            );
-          }
-          return (
-            this.baseProvider?.applyCompletion?.(
-              lines,
-              cursorLine,
-              cursorCol,
-              item,
-              prefix,
-            ) ?? { lines, cursorLine, cursorCol }
-          );
-        },
-      };
-      super.setAutocompleteProvider(compositeProvider);
-    }
-  }
-
-  function applyEditorMode(ctx: {
-    ui: {
-      setEditorComponent: (
-        factory: ((tui: any, theme: any, keybindings: any) => any) | undefined,
-      ) => void;
-    };
-  }) {
-    if (!shouldEnableMentions()) return;
-    ctx.ui.setEditorComponent(
-      (tui: any, theme: any, keybindings: any) => new FffEditor(tui, theme, keybindings),
-    );
-  }
-
   // --- Flags / lifecycle ---
 
   pi.registerFlag("fff-mode", {
@@ -680,7 +526,6 @@ export default function fffExtension(pi: ExtensionAPI) {
     try {
       activeCwd = ctx.cwd;
       await withFinderLease(activeCwd, () => undefined);
-      applyEditorMode(ctx);
     } catch (e: unknown) {
       ctx.ui.notify(
         `FFF init failed: ${e instanceof Error ? e.message : String(e)}`,
@@ -1554,9 +1399,6 @@ export default function fffExtension(pi: ExtensionAPI) {
       const newMode = arg as FffMode;
       const oldMode = getMode();
       setMode(newMode);
-
-      // Apply immediately using the shared function
-      applyEditorMode(ctx);
 
       const note =
         (oldMode === "override") !== (newMode === "override")

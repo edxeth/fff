@@ -73,12 +73,12 @@ pi install npm:@edxeth/pi-fff
 
 ### Modes
 
-Three operating modes, switchable at runtime with `/fff-mode`:
+Three operating modes, switchable at runtime with `/fff-mode`. FFF only registers tools.
 
 | Mode                     | What it does                                                                      |
 | ------------------------ | --------------------------------------------------------------------------------- |
-| `tools-and-ui` (default) | Adds `ffgrep` and `fffind` tools, replaces `@`-mention autocomplete with FFF.     |
-| `tools-only`             | Only tool injection. Keeps pi's native editor autocomplete.                       |
+| `tools-and-ui` (default) | Adds `ffgrep` and `fffind` tools alongside pi's built-ins.                         |
+| `tools-only`             | Same as `tools-and-ui` (kept as an alias for backwards compatibility).            |
 | `override`               | Replaces pi's built-in `grep`, `find`, and `multi_grep` with FFF implementations. |
 
 Env vars: `PI_FFF_MODE`, `PI_FFF_MULTIGREP=0` (disable multi_grep, enabled by default), `FFF_FRECENCY_DB`, `FFF_HISTORY_DB`. Flags: `--fff-mode`, `--fff-frecency-db`, `--fff-history-db`.
@@ -98,7 +98,7 @@ Source: [`packages/pi-fff/`](./packages/pi-fff/).
 
 </details>
 
-The Pi extension swaps pi's native tools for FFF implementations and feeds the interactive editor's `@`-mention autocomplete from the frecency-ranked index.
+The Pi extension swaps pi's native tools for FFF implementations.
 
 <details id="neovim-plugin">
 <summary>
