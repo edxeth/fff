@@ -1166,10 +1166,9 @@ export default function fffExtension(pi: ExtensionAPI) {
       const pattern = args?.pattern ?? "";
       const path = formatRenderPath(args?.path);
       let content =
-        theme.fg("toolTitle", theme.bold(toolNames.find)) +
-        " " +
-        theme.fg("accent", pattern) +
-        theme.fg("toolOutput", ` in ${path}`);
+        theme.fg("toolTitle", theme.bold(toolNames.find));
+      if (pattern) content += " " + theme.fg("accent", pattern);
+      content += theme.fg("toolOutput", ` in ${path}`);
       if (args?.limit !== undefined)
         content += theme.fg("toolOutput", ` (limit ${args.limit})`);
       if (args?.cursor) content += theme.fg("muted", ` (page)`);
